@@ -271,9 +271,9 @@ resource "aws_sfn_state_machine" "etl_pipeline" {
         Type = "Task"
         Resource = "arn:aws:states:::sns:publish"
         Parameters = {
-          TopicArn = var.alert_email != "" ? "${aws_sns_topic.pipeline_alerts[0].arn}" : "arn:aws:sns:${local.region}:${local.account_id}:dummy"
-          Message = "✅ Lakehouse ETL pipeline completed successfully."
-          Subject = "[${var.environment}] Lakehouse ETL — SUCCESS"
+          TopicArn = aws_sns_topic.pipeline_alerts.arn
+          Message  = "✅ Lakehouse ETL pipeline completed successfully."
+          Subject  = "[${var.environment}] Lakehouse ETL — SUCCESS"
         }
         End = true
       },
@@ -283,9 +283,9 @@ resource "aws_sfn_state_machine" "etl_pipeline" {
         Type = "Task"
         Resource = "arn:aws:states:::sns:publish"
         Parameters = {
-          TopicArn = var.alert_email != "" ? "${aws_sns_topic.pipeline_alerts[0].arn}" : "arn:aws:sns:${local.region}:${local.account_id}:dummy"
+          TopicArn    = aws_sns_topic.pipeline_alerts.arn
           "Message.$" = "States.Format('❌ Lakehouse ETL pipeline FAILED. Execution: {}', $$.Execution.Name)"
-          Subject = "[${var.environment}] Lakehouse ETL — FAILURE"
+          Subject     = "[${var.environment}] Lakehouse ETL — FAILURE"
         }
         Next = "PipelineFailed"
       },

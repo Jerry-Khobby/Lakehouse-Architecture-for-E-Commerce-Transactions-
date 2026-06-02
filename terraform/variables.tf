@@ -137,9 +137,15 @@ variable "sfn_timeout_seconds" {
   default     = 7200 # 2 hours
 }
 
-# ── Notifications (optional) ──────────────────────────────────────────────────
+# ── Notifications ─────────────────────────────────────────────────────────────
 variable "alert_email" {
-  description = "Email address for pipeline failure alerts (leave empty to skip)"
+  description = "Email address for pipeline alerts"
   type        = string
-  default     = ""
+  default     = "jeremiah.coblah@amalitechtraining.org"
+}
+
+variable "slack_webhook_url" {
+  description = "Slack incoming-webhook URL for pipeline alerts"
+  type        = string
+  sensitive   = true
 }

@@ -4,6 +4,34 @@
 # All jobs share the same execution role defined in main.tf.
 # ─────────────────────────────────────────────────────────────────────────────
 
+# -- Package glue_jobs/ as a zip so Glue can import it via --extra-py-files ----
+# The zip must contain glue_jobs/ at the root so `from glue_jobs.utils.common`
+# resolves correctly inside the Glue Python runtime.
+data "archive_file" "glue_jobs_package" {
+  type        = "zip"
+  output_path = "${path.module}/../glue_jobs.zip"
+
+  source {
+    content  = file("${path.module}/../glue_jobs/__init__.py")
+    filename = "glue_jobs/__init__.py"
+  }
+  source {
+    content  = file("${path.module}/../glue_jobs/utils/__init__.py")
+    filename = "glue_jobs/utils/__init__.py"
+  }
+  source {
+    content  = file("${path.module}/../glue_jobs/utils/common.py")
+    filename = "glue_jobs/utils/common.py"
+  }
+}
+
+resource "aws_s3_object" "glue_jobs_package" {
+  bucket = aws_s3_bucket.scripts.id
+  key    = "glue_jobs/glue_jobs.zip"
+  source = data.archive_file.glue_jobs_package.output_path
+  etag   = data.archive_file.glue_jobs_package.output_md5
+}
+
 # -- Upload scripts to S3 ------------------------------------------------------
 # etag ensures Terraform re-uploads a file whenever its local content changes.
 
@@ -46,6 +74,8 @@ locals {
     "--enable-glue-datacatalog"          = "true"
     "--conf"                             = "spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog"
     "--datalake-formats"                 = "delta"
+    # Makes `from glue_jobs.utils.common import ...` resolvable in the Glue runtime
+    "--extra-py-files" = "s3://${aws_s3_bucket.scripts.id}/glue_jobs/glue_jobs.zip"
     # Runtime parameters — overridden per execution by Step Functions
     "--DATA_BUCKET"    = aws_s3_bucket.data.id
     "--SCRIPTS_BUCKET" = aws_s3_bucket.scripts.id

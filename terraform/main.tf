@@ -380,7 +380,7 @@ resource "aws_iam_role_policy" "sfn_glue" {
         Sid    = "SNSPublish"
         Effect = "Allow"
         Action = ["sns:Publish"]
-        Resource = var.alert_email != "" ? [aws_sns_topic.pipeline_alerts[0].arn] : ["*"]
+        Resource = [aws_sns_topic.pipeline_alerts.arn]
       },
       {
         Sid    = "CloudWatchLogs"
@@ -585,13 +585,12 @@ resource "aws_cloudwatch_log_resource_policy" "sfn" {
 # ─────────────────────────────────────────────────────────────────────────────
 
 resource "aws_sns_topic" "pipeline_alerts" {
-  count = var.alert_email != "" ? 1 : 0
-  name  = "${local.name_prefix}-pipeline-alerts"
+  name = "${local.name_prefix}-pipeline-alerts"
 }
 
 resource "aws_sns_topic_subscription" "email_alert" {
   count     = var.alert_email != "" ? 1 : 0
-  topic_arn = aws_sns_topic.pipeline_alerts[0].arn
+  topic_arn = aws_sns_topic.pipeline_alerts.arn
   protocol  = "email"
   endpoint  = var.alert_email
 }

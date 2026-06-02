@@ -1,0 +1,106 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# LAMBDA — Slack notification forwarder
+# SNS publishes to the pipeline_alerts topic; this Lambda receives the message
+# and POSTs it to the Slack incoming-webhook URL.
+# ─────────────────────────────────────────────────────────────────────────────
+
+data "archive_file" "slack_notifier" {
+  type        = "zip"
+  output_path = "${path.module}/../slack_notifier.zip"
+
+  source {
+    filename = "slack_notifier.py"
+    content  = <<-PYTHON
+import json
+import os
+import urllib.request
+
+def handler(event, context):
+    webhook_url = os.environ["SLACK_WEBHOOK_URL"]
+
+    for record in event.get("Records", []):
+        sns_msg  = record["Sns"]
+        subject  = sns_msg.get("Subject", "Lakehouse ETL Notification")
+        message  = sns_msg["Message"]
+
+        is_success = "SUCCESS" in subject.upper()
+        color      = "#36a64f" if is_success else "#d9534f"
+        icon       = ":white_check_mark:" if is_success else ":x:"
+
+        payload = {
+            "attachments": [{
+                "color":  color,
+                "title":  f"{icon}  {subject}",
+                "text":   message,
+                "footer": "AWS Lakehouse ETL Pipeline",
+            }]
+        }
+
+        data = json.dumps(payload).encode("utf-8")
+        req  = urllib.request.Request(
+            webhook_url,
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=5)
+PYTHON
+  }
+}
+
+# -- IAM role for the Lambda ---------------------------------------------------
+resource "aws_iam_role" "lambda_slack_role" {
+  name = "${local.name_prefix}-lambda-slack-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "lambda.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "lambda_basic_execution" {
+  role       = aws_iam_role.lambda_slack_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+# -- Lambda function -----------------------------------------------------------
+resource "aws_lambda_function" "slack_notifier" {
+  function_name    = "${local.name_prefix}-slack-notifier"
+  role             = aws_iam_role.lambda_slack_role.arn
+  filename         = data.archive_file.slack_notifier.output_path
+  source_code_hash = data.archive_file.slack_notifier.output_base64sha256
+  handler          = "slack_notifier.handler"
+  runtime          = "python3.12"
+  timeout          = 10
+
+  environment {
+    variables = {
+      SLACK_WEBHOOK_URL = var.slack_webhook_url
+    }
+  }
+}
+
+resource "aws_cloudwatch_log_group" "slack_notifier" {
+  name              = "/aws/lambda/${aws_lambda_function.slack_notifier.function_name}"
+  retention_in_days = 14
+}
+
+# -- Allow SNS to invoke the Lambda --------------------------------------------
+resource "aws_lambda_permission" "sns_invoke_slack" {
+  statement_id  = "AllowSNSInvoke"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.slack_notifier.function_name
+  principal     = "sns.amazonaws.com"
+  source_arn    = aws_sns_topic.pipeline_alerts.arn
+}
+
+# -- Subscribe the Lambda to the SNS topic ------------------------------------
+resource "aws_sns_topic_subscription" "slack_lambda" {
+  topic_arn = aws_sns_topic.pipeline_alerts.arn
+  protocol  = "lambda"
+  endpoint  = aws_lambda_function.slack_notifier.arn
+}
