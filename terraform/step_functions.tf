@@ -1,7 +1,8 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP FUNCTIONS STATE MACHINE
 # Full ETL orchestration:
-#   Trigger → Products | Orders | OrderItems (parallel)
+#   Trigger → RouteToETLJob (Choice: filename → correct job)
+#          → RunProductsJob | RunOrdersJob | RunOrderItemsJob
 #          → Crawlers (parallel)
 #          → Athena validation
 #          → Success / Failure notification
@@ -29,134 +30,124 @@ resource "aws_sfn_state_machine" "etl_pipeline" {
 
   definition = jsonencode({
     Comment = "E-commerce Lakehouse ETL pipeline — ${var.environment}"
-    StartAt = "RunETLJobs"
+    StartAt = "RouteToETLJob"
 
     States = {
 
-      # ── Fan out: run all three Glue jobs in parallel ──────────────────────
-      RunETLJobs = {
-        Type = "Parallel"
-        Branches = [
-
-          # Branch 1 — Products
+      # ── Route to the correct job based on the uploaded file's S3 key ─────
+      # order_items check must precede the orders check (substring overlap).
+      RouteToETLJob = {
+        Type = "Choice"
+        Choices = [
           {
-            StartAt = "RunProductsJob"
-            States = {
-              RunProductsJob = {
-                Type     = "Task"
-                Resource = "arn:aws:states:::glue:startJobRun.sync"
-                Parameters = {
-                  JobName = aws_glue_job.products.name
-                  Arguments = {
-                    "--RAW_KEY.$" = "$.key"
-                    "--DATA_BUCKET.$" = "$.bucket"
-                  }
-                }
-                TimeoutSeconds = var.sfn_timeout_seconds
-                HeartbeatSeconds = 300
-                Retry = [{
-                  ErrorEquals     = ["Glue.AWSGlueException", "States.TaskFailed"]
-                  IntervalSeconds = 30
-                  MaxAttempts     = 2
-                  BackoffRate     = 2.0
-                }]
-                Catch = [{
-                  ErrorEquals = ["States.ALL"]
-                  Next        = "ProductsJobFailed"
-                  ResultPath  = "$.error"
-                }]
-                End = true
-              }
-              ProductsJobFailed = {
-                Type  = "Fail"
-                Error = "ProductsJobFailed"
-                Cause = "Glue products job encountered an error"
-              }
-            }
+            Variable      = "$.key"
+            StringMatches = "*order_item*"
+            Next          = "RunOrderItemsJob"
           },
-
-          # Branch 2 — Orders
           {
-            StartAt = "RunOrdersJob"
-            States = {
-              RunOrdersJob = {
-                Type     = "Task"
-                Resource = "arn:aws:states:::glue:startJobRun.sync"
-                Parameters = {
-                  JobName = aws_glue_job.orders.name
-                  Arguments = {
-                    "--RAW_KEY.$" = "$.key"
-                    "--DATA_BUCKET.$" = "$.bucket"
-                  }
-                }
-                TimeoutSeconds   = var.sfn_timeout_seconds
-                HeartbeatSeconds = 300
-                Retry = [{
-                  ErrorEquals     = ["Glue.AWSGlueException", "States.TaskFailed"]
-                  IntervalSeconds = 30
-                  MaxAttempts     = 2
-                  BackoffRate     = 2.0
-                }]
-                Catch = [{
-                  ErrorEquals = ["States.ALL"]
-                  Next        = "OrdersJobFailed"
-                  ResultPath  = "$.error"
-                }]
-                End = true
-              }
-              OrdersJobFailed = {
-                Type  = "Fail"
-                Error = "OrdersJobFailed"
-                Cause = "Glue orders job encountered an error"
-              }
-            }
+            Variable      = "$.key"
+            StringMatches = "*order-item*"
+            Next          = "RunOrderItemsJob"
           },
-
-          # Branch 3 — Order Items
           {
-            StartAt = "RunOrderItemsJob"
-            States = {
-              RunOrderItemsJob = {
-                Type     = "Task"
-                Resource = "arn:aws:states:::glue:startJobRun.sync"
-                Parameters = {
-                  JobName = aws_glue_job.order_items.name
-                  Arguments = {
-                    "--RAW_KEY.$" = "$.key"
-                    "--DATA_BUCKET.$" = "$.bucket"
-                  }
-                }
-                TimeoutSeconds   = var.sfn_timeout_seconds
-                HeartbeatSeconds = 300
-                Retry = [{
-                  ErrorEquals     = ["Glue.AWSGlueException", "States.TaskFailed"]
-                  IntervalSeconds = 30
-                  MaxAttempts     = 2
-                  BackoffRate     = 2.0
-                }]
-                Catch = [{
-                  ErrorEquals = ["States.ALL"]
-                  Next        = "OrderItemsJobFailed"
-                  ResultPath  = "$.error"
-                }]
-                End = true
-              }
-              OrderItemsJobFailed = {
-                Type  = "Fail"
-                Error = "OrderItemsJobFailed"
-                Cause = "Glue order_items job encountered an error"
-              }
-            }
+            Variable      = "$.key"
+            StringMatches = "*order*"
+            Next          = "RunOrdersJob"
+          },
+          {
+            Variable      = "$.key"
+            StringMatches = "*product*"
+            Next          = "RunProductsJob"
           }
         ]
+        Default = "UnknownFileType"
+      },
 
-        # ── After all 3 parallel jobs succeed ────────────────────────────────
-        Next = "RunCrawlers"
+      # ── Products ──────────────────────────────────────────────────────────
+      RunProductsJob = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::glue:startJobRun.sync"
+        Parameters = {
+          JobName = aws_glue_job.products.name
+          Arguments = {
+            "--RAW_KEY.$"     = "$.key"
+            "--DATA_BUCKET.$" = "$.bucket"
+          }
+        }
+        TimeoutSeconds   = var.sfn_timeout_seconds
+        HeartbeatSeconds = 300
+        Retry = [{
+          ErrorEquals     = ["Glue.AWSGlueException", "States.TaskFailed"]
+          IntervalSeconds = 30
+          MaxAttempts     = 2
+          BackoffRate     = 2.0
+        }]
         Catch = [{
           ErrorEquals = ["States.ALL"]
           Next        = "NotifyFailure"
-          ResultPath  = "$.parallelError"
+          ResultPath  = "$.error"
         }]
+        Next = "RunCrawlers"
+      },
+
+      # ── Orders ────────────────────────────────────────────────────────────
+      RunOrdersJob = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::glue:startJobRun.sync"
+        Parameters = {
+          JobName = aws_glue_job.orders.name
+          Arguments = {
+            "--RAW_KEY.$"     = "$.key"
+            "--DATA_BUCKET.$" = "$.bucket"
+          }
+        }
+        TimeoutSeconds   = var.sfn_timeout_seconds
+        HeartbeatSeconds = 300
+        Retry = [{
+          ErrorEquals     = ["Glue.AWSGlueException", "States.TaskFailed"]
+          IntervalSeconds = 30
+          MaxAttempts     = 2
+          BackoffRate     = 2.0
+        }]
+        Catch = [{
+          ErrorEquals = ["States.ALL"]
+          Next        = "NotifyFailure"
+          ResultPath  = "$.error"
+        }]
+        Next = "RunCrawlers"
+      },
+
+      # ── Order Items ───────────────────────────────────────────────────────
+      RunOrderItemsJob = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::glue:startJobRun.sync"
+        Parameters = {
+          JobName = aws_glue_job.order_items.name
+          Arguments = {
+            "--RAW_KEY.$"     = "$.key"
+            "--DATA_BUCKET.$" = "$.bucket"
+          }
+        }
+        TimeoutSeconds   = var.sfn_timeout_seconds
+        HeartbeatSeconds = 300
+        Retry = [{
+          ErrorEquals     = ["Glue.AWSGlueException", "States.TaskFailed"]
+          IntervalSeconds = 30
+          MaxAttempts     = 2
+          BackoffRate     = 2.0
+        }]
+        Catch = [{
+          ErrorEquals = ["States.ALL"]
+          Next        = "NotifyFailure"
+          ResultPath  = "$.error"
+        }]
+        Next = "RunCrawlers"
+      },
+
+      UnknownFileType = {
+        Type  = "Fail"
+        Error = "UnknownFileType"
+        Cause = "Uploaded file key did not match products, orders, or order_items patterns."
       },
 
       # ── Fan out: update all three catalog tables in parallel ──────────────

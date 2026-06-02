@@ -4,6 +4,37 @@
 # All jobs share the same execution role defined in main.tf.
 # ─────────────────────────────────────────────────────────────────────────────
 
+# -- Upload scripts to S3 ------------------------------------------------------
+# etag ensures Terraform re-uploads a file whenever its local content changes.
+
+resource "aws_s3_object" "products_script" {
+  bucket = aws_s3_bucket.scripts.id
+  key    = "glue_jobs/products_job.py"
+  source = "${path.module}/../glue_jobs/products_job.py"
+  etag   = filemd5("${path.module}/../glue_jobs/products_job.py")
+}
+
+resource "aws_s3_object" "orders_script" {
+  bucket = aws_s3_bucket.scripts.id
+  key    = "glue_jobs/orders_job.py"
+  source = "${path.module}/../glue_jobs/orders_job.py"
+  etag   = filemd5("${path.module}/../glue_jobs/orders_job.py")
+}
+
+resource "aws_s3_object" "order_items_script" {
+  bucket = aws_s3_bucket.scripts.id
+  key    = "glue_jobs/order_items_job.py"
+  source = "${path.module}/../glue_jobs/order_items_job.py"
+  etag   = filemd5("${path.module}/../glue_jobs/order_items_job.py")
+}
+
+resource "aws_s3_object" "common_utils" {
+  bucket = aws_s3_bucket.scripts.id
+  key    = "glue_jobs/utils/common.py"
+  source = "${path.module}/../glue_jobs/utils/common.py"
+  etag   = filemd5("${path.module}/../glue_jobs/utils/common.py")
+}
+
 locals {
   common_glue_args = {
     "--job-language"                     = "python"
