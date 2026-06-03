@@ -6,7 +6,9 @@ Provides:
   - Job argument parsing
   - Rejected-record writer
   - S3 file archiver (copy raw → archived, then delete source)
-  - Delta table initialiser (idempotent first-run safe)
+  - Delta table initialiser  ← FIX: seeds empty DataFrame instead of
+                                     DeltaTable.createIfNotExists() to avoid
+                                     "partitioning when schema not defined" on Glue 4.0
   - Glue Data Catalog table registrar
 """
 
@@ -18,7 +20,6 @@ from typing import List, Optional
 import boto3
 from botocore.exceptions import ClientError
 
-# Glue context imports — only available inside a Glue job runtime
 from awsglue.utils import getResolvedOptions
 from awsglue.context import GlueContext
 from awsglue.job import Job
@@ -29,6 +30,8 @@ from pyspark.sql.types import StructType
 from delta.tables import DeltaTable
 
 
+# Logging
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -38,32 +41,25 @@ logging.basicConfig(
 logger = logging.getLogger("lakehouse.common")
 
 
-
 # Spark / Glue session
+
 
 def build_spark_session(job_name: str) -> tuple:
     """
     Initialise SparkContext, GlueContext, SparkSession and Job.
 
     Delta Lake extensions are activated via --conf args that Terraform
-    already injects into every Glue job's default_arguments:
+    injects into every Glue job's default_arguments:
       spark.sql.extensions = io.delta.sql.DeltaSparkSessionExtension
       spark.sql.catalog.spark_catalog = org.apache.spark.sql.delta.catalog.DeltaCatalog
 
-    The Glue Data Catalog metastore integration is activated by
-    --enable-glue-datacatalog (also set in Terraform).
-
-    Returns:
-        (sc, glue_ctx, spark, job) — all four Glue/Spark handles
+    Returns: (sc, glue_ctx, spark, job)
     """
-    sc = SparkContext.getOrCreate()
+    sc       = SparkContext.getOrCreate()
     glue_ctx = GlueContext(sc)
-    spark = glue_ctx.spark_session
+    spark    = glue_ctx.spark_session
 
-    # Confirm Delta extensions loaded
-    active_extensions = spark.conf.get(
-        "spark.sql.extensions", ""
-    )
+    active_extensions = spark.conf.get("spark.sql.extensions", "")
     if "DeltaSparkSessionExtension" not in active_extensions:
         raise RuntimeError(
             "Delta Lake extensions not loaded. "
@@ -77,12 +73,9 @@ def build_spark_session(job_name: str) -> tuple:
     return sc, glue_ctx, spark, job
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Argument parsing
-# ─────────────────────────────────────────────────────────────────────────────
 
-# All argument keys that every job must receive (either from Glue
-# default_arguments or from the Step Functions per-execution override).
+
 REQUIRED_ARGS = [
     "JOB_NAME",
     "DATA_BUCKET",
@@ -90,30 +83,28 @@ REQUIRED_ARGS = [
     "ENVIRONMENT",
     "DATABASE_NAME",
     "DATASET",
-    "RAW_KEY",          # exact S3 key of the triggering file, passed by Step Functions
+    "RAW_KEY",          # exact S3 key of the file that triggered EventBridge
     "RAW_PREFIX",
     "PROCESSED_PREFIX",
     "ARCHIVED_PREFIX",
     "REJECTED_PREFIX",
-    "MERGE_KEYS",       # comma-separated, e.g. "order_id" or "id,order_id"
-    "PARTITION_COLS",   # comma-separated, e.g. "date" or "department"
+    "MERGE_KEYS",       # comma-separated e.g. "order_id" or "id,order_id"
+    "PARTITION_COLS",   # comma-separated e.g. "date" or "department"
+    "SNS_TOPIC_ARN",    # SNS topic for stage-level alerts
 ]
 
 
 def parse_args() -> dict:
     """
-    Parse and return all Glue job arguments as a plain dict.
-
-    Splits MERGE_KEYS and PARTITION_COLS into lists for convenience.
-    Validates that none of the required keys are empty.
+    Parse all Glue --ARG parameters into a plain dict.
+    Splits MERGE_KEYS and PARTITION_COLS into lists.
+    Validates that no critical key is blank.
     """
     raw = getResolvedOptions(sys.argv, REQUIRED_ARGS)
 
-    # Normalise list-typed args
-    raw["MERGE_KEYS_LIST"] = [k.strip() for k in raw["MERGE_KEYS"].split(",") if k.strip()]
-    raw["PARTITION_COLS_LIST"] = [c.strip() for c in raw["PARTITION_COLS"].split(",") if c.strip()]
+    raw["MERGE_KEYS_LIST"]    = [k.strip() for k in raw["MERGE_KEYS"].split(",")    if k.strip()]
+    raw["PARTITION_COLS_LIST"]= [c.strip() for c in raw["PARTITION_COLS"].split(",") if c.strip()]
 
-    # Validate nothing critical is blank
     for key in ("DATA_BUCKET", "DATASET", "RAW_KEY", "DATABASE_NAME"):
         if not raw.get(key, "").strip():
             raise ValueError(f"Required job argument --{key} is empty or missing.")
@@ -125,9 +116,8 @@ def parse_args() -> dict:
     return raw
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Rejected-record writer
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 def write_rejected(
     df: DataFrame,
@@ -137,39 +127,34 @@ def write_rejected(
     reason_col: Optional[str] = None,
 ) -> int:
     """
-    Write rejected rows to the rejected/ S3 prefix.
+    Write rejected rows to s3://<DATA_BUCKET>/rejected/<DATASET>/<date>/<run_id>/
 
-    If `reason_col` is provided, that column already contains per-row
-    rejection reasons (used when multiple checks are combined). Otherwise
-    the scalar `rejection_reason` string is added as a new column.
+    If reason_col is provided that column already contains per-row reasons.
+    Otherwise rejection_reason (scalar string) is added as a new column.
+    Three audit columns are always appended: _rejected_at, _job_run_id, _source_key.
 
-    Output path:
-        s3://<DATA_BUCKET>/rejected/<DATASET>/<YYYY-MM-DD>/<job_run_id>/
-
-    Returns the count of rejected rows written.
+    Returns the count of rows written (0 = nothing written, short-circuits early).
     """
     count = df.count()
     if count == 0:
         return 0
 
-    run_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    run_date    = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     output_path = (
         f"s3://{args['DATA_BUCKET']}/"
-        f"{args['REJECTED_PREFIX']}{args['DATASET']}/"
+        f"{args['REJECTED_PREFIX'].rstrip('/')}/{args['DATASET']}/"
         f"{run_date}/{job_run_id}/"
     )
 
-    if reason_col:
-        out_df = df.withColumn("rejection_reason", F.col(reason_col))
-    else:
-        out_df = df.withColumn("rejection_reason", F.lit(rejection_reason))
-
-    # Add metadata columns for auditability
     out_df = (
-        out_df
-        .withColumn("_rejected_at", F.current_timestamp())
-        .withColumn("_job_run_id", F.lit(job_run_id))
-        .withColumn("_source_key", F.lit(args["RAW_KEY"]))
+        df
+        .withColumn(
+            "rejection_reason",
+            F.col(reason_col) if reason_col else F.lit(rejection_reason),
+        )
+        .withColumn("_rejected_at",  F.current_timestamp())
+        .withColumn("_job_run_id",   F.lit(job_run_id))
+        .withColumn("_source_key",   F.lit(args["RAW_KEY"]))
     )
 
     out_df.write.mode("append").parquet(output_path)
@@ -181,56 +166,63 @@ def write_rejected(
     return count
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # S3 file archiver
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 def archive_source_file(args: dict) -> None:
     """
-    Move the source CSV from raw/ to archived/ after a successful Delta commit.
+    Move the source CSV from raw/ → archived/ after a successful Delta commit.
 
-    Performs: S3 copy_object → S3 delete_object.
-    Only call this AFTER the Delta merge has completed successfully.
+    Uses boto3 copy_object → delete_object.
+    ExpectedBucketOwner is set on both calls to guard against bucket-confusion
+    attacks — both source and destination live in the same account-owned bucket.
 
-    Source: s3://<DATA_BUCKET>/<RAW_KEY>
-    Dest:   s3://<DATA_BUCKET>/archived/<DATASET>/<YYYY-MM-DD>/<filename>
+    This function logs but does NOT re-raise on ClientError so that a failed
+    archive never marks an otherwise-successful pipeline run as failed.
     """
-    s3 = boto3.client("s3")
-    bucket = args["DATA_BUCKET"]
+    s3         = boto3.client("s3")
+    sts        = boto3.client("sts")
+    bucket     = args["DATA_BUCKET"]
     source_key = args["RAW_KEY"]
+    account_id = sts.get_caller_identity()["Account"]
 
     filename = source_key.split("/")[-1]
     run_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     dest_key = (
-        f"{args['ARCHIVED_PREFIX']}{args['DATASET']}/"
+        f"{args['ARCHIVED_PREFIX'].rstrip('/')}/{args['DATASET']}/"
         f"{run_date}/{filename}"
     )
 
     try:
-        # Copy to archived/
         s3.copy_object(
             Bucket=bucket,
             CopySource={"Bucket": bucket, "Key": source_key},
             Key=dest_key,
+            ExpectedBucketOwner=account_id,
         )
-        logger.info("Archived: s3://%s/%s → s3://%s/%s", bucket, source_key, bucket, dest_key)
+        logger.info(
+            "Archived: s3://%s/%s → s3://%s/%s",
+            bucket, source_key, bucket, dest_key,
+        )
 
-        # Delete the original from raw/
-        s3.delete_object(Bucket=bucket, Key=source_key)
+        s3.delete_object(
+            Bucket=bucket,
+            Key=source_key,
+            ExpectedBucketOwner=account_id,
+        )
         logger.info("Deleted source: s3://%s/%s", bucket, source_key)
 
     except ClientError as exc:
-        # Log but do not re-raise — a failed archive is not a reason to
-        # mark the pipeline as failed when the Delta write succeeded.
+        # Log but do not re-raise: a failed archive must not fail the pipeline
+        # when the Delta write already committed successfully.
         logger.error(
             "Archive step failed for s3://%s/%s — %s",
             bucket, source_key, exc,
         )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Delta table initialiser
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 def ensure_delta_table(
     spark: SparkSession,
@@ -241,14 +233,24 @@ def ensure_delta_table(
     database_name: str,
 ) -> None:
     """
-    Create the Delta table at `table_path` if it does not yet exist.
+    Ensure the Delta table exists at table_path before any MERGE runs.
 
-    Uses DeltaTable.createIfNotExists() so this is fully idempotent —
-    safe to call on every job run without risk of data loss.
+    WHY this exists:
+        DeltaTable.merge() on a non-existent path raises AnalysisException.
+        We must seed the table before the first merge.
 
-    Also registers the table in the Glue Data Catalog (via Spark SQL
-    CREATE TABLE IF NOT EXISTS … USING DELTA) so the first run is
-    immediately queryable by Athena without waiting for a crawler.
+    WHY we write an empty DataFrame instead of DeltaTable.createIfNotExists():
+        On Glue 4.0 / Delta 2.x, calling .createIfNotExists().addColumns(schema)
+        .partitionedBy(...) raises:
+            AnalysisException: It is not allowed to specify partitioning
+            when the table schema is not defined.
+        Writing an empty DataFrame avoids this entirely — Spark writes the
+        Delta transaction log (_delta_log/00000000000000000000.json) with the
+        schema and partition spec derived from the DataFrame's schema and the
+        .partitionBy() call, which Delta accepts unconditionally.
+
+    The function is fully idempotent: isDeltaTable() returns True on every
+    subsequent run and the body is skipped with no I/O cost.
     """
     if DeltaTable.isDeltaTable(spark, table_path):
         logger.info("Delta table already exists at %s — skipping init.", table_path)
@@ -256,36 +258,35 @@ def ensure_delta_table(
 
     logger.info("Initialising Delta table at %s …", table_path)
 
-    builder = (
-        DeltaTable.createIfNotExists(spark)
-        .location(table_path)
-        .addColumns(schema)
-    )
-    if partition_cols:
-        builder = builder.partitionedBy(*partition_cols)
+    empty_df = spark.createDataFrame([], schema)
 
-    builder.execute()
+    writer = empty_df.write.format("delta").mode("overwrite")
+    if partition_cols:
+        writer = writer.partitionBy(*partition_cols)
+    writer.save(table_path)
 
     # Register in Glue Data Catalog so Athena can query it immediately
-    partition_clause = (
-        f"PARTITIONED BY ({', '.join(partition_cols)})" if partition_cols else ""
-    )
+    # without waiting for a crawler to run.
+    # PARTITIONED BY is intentionally omitted: Spark SQL raises
+    # "AnalysisException: It is not allowed to specify partitioning when the
+    # table schema is not defined" when PARTITIONED BY appears without inline
+    # column definitions. Delta already persisted the schema and partition spec
+    # to _delta_log/ in the write above — the CREATE TABLE just registers the
+    # existing table in the catalog and reads everything from the Delta log.
     spark.sql(f"""
         CREATE TABLE IF NOT EXISTS `{database_name}`.`{table_name}`
         USING DELTA
-        {partition_clause}
         LOCATION '{table_path}'
     """)
 
     logger.info(
-        "Delta table initialised and registered as %s.%s",
-        database_name, table_name,
+        "Delta table initialised and registered: %s.%s at %s",
+        database_name, table_name, table_path,
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Glue Data Catalog registrar
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 def update_catalog_table(
     args: dict,
@@ -295,68 +296,67 @@ def update_catalog_table(
     partition_cols: List[str],
 ) -> None:
     """
-    Update the Glue Data Catalog table metadata after a successful Delta write.
+    Update (or create) the Glue Data Catalog table after a successful Delta write.
 
-    This ensures the catalog reflects the current schema and location
-    so Athena queries always read the latest table definition.
+    Uses the boto3 Glue client directly rather than Spark SQL ALTER TABLE
+    because the boto3 path works identically across all Glue versions and
+    doesn't require an active SparkSession when called from outside a job.
 
-    Uses boto3 Glue client directly (more reliable than Spark SQL ALTER TABLE
-    across all Glue versions).
+    Column list is built from the StructType, with partition columns separated
+    into PartitionKeys as the Glue API requires.
     """
-    glue = boto3.client("glue", region_name=_get_region())
+    glue     = boto3.client("glue", region_name=_get_region())
     database = args["DATABASE_NAME"]
 
-    # Build column list from Spark schema (excluding partition columns)
     non_partition_cols = [f for f in schema.fields if f.name not in partition_cols]
-    partition_fields = [f for f in schema.fields if f.name in partition_cols]
+    partition_fields   = [f for f in schema.fields if f.name in partition_cols]
 
-    def _spark_type_to_glue(dtype) -> str:
-        """Map Spark DataType to Glue/Hive type string."""
+    def _to_glue_type(dtype) -> str:
         from pyspark.sql.types import (
             StringType, IntegerType, LongType, DoubleType,
-            FloatType, BooleanType, TimestampType, DateType,
-            DecimalType,
+            FloatType, BooleanType, TimestampType, DateType, DecimalType,
         )
         mapping = {
-            StringType: "string",
-            IntegerType: "int",
-            LongType: "bigint",
-            DoubleType: "double",
-            FloatType: "float",
-            BooleanType: "boolean",
+            StringType:    "string",
+            IntegerType:   "int",
+            LongType:      "bigint",
+            DoubleType:    "double",
+            FloatType:     "float",
+            BooleanType:   "boolean",
             TimestampType: "timestamp",
-            DateType: "date",
+            DateType:      "date",
         }
         if isinstance(dtype, DecimalType):
             return f"decimal({dtype.precision},{dtype.scale})"
         return mapping.get(type(dtype), "string")
 
-    glue_cols = [
-        {"Name": f.name, "Type": _spark_type_to_glue(f.dataType)}
-        for f in non_partition_cols
-    ]
-    glue_partition_keys = [
-        {"Name": f.name, "Type": _spark_type_to_glue(f.dataType)}
-        for f in partition_fields
-    ]
-
     table_input = {
         "Name": table_name,
-        "Description": f"Delta Lake table managed by Lakehouse ETL — {args['ENVIRONMENT']}",
+        "Description": (
+            f"Delta Lake table managed by Lakehouse ETL — {args['ENVIRONMENT']}"
+        ),
         "StorageDescriptor": {
-            "Columns": glue_cols,
+            "Columns": [
+                {"Name": f.name, "Type": _to_glue_type(f.dataType)}
+                for f in non_partition_cols
+            ],
             "Location": table_path,
-            "InputFormat": "org.apache.hadoop.mapred.SequenceFileInputFormat",
+            "InputFormat":  "org.apache.hadoop.mapred.SequenceFileInputFormat",
             "OutputFormat": "org.apache.hadoop.hive.ql.io.HiveSequenceFileOutputFormat",
             "SerdeInfo": {
-                "SerializationLibrary": "org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe",
+                "SerializationLibrary": (
+                    "org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe"
+                ),
             },
         },
-        "PartitionKeys": glue_partition_keys,
+        "PartitionKeys": [
+            {"Name": f.name, "Type": _to_glue_type(f.dataType)}
+            for f in partition_fields
+        ],
         "TableType": "EXTERNAL_TABLE",
         "Parameters": {
-            "classification": "delta",
-            "spark.sql.sources.provider": "delta",
+            "classification":                    "delta",
+            "spark.sql.sources.provider":        "delta",
             "spark.sql.sources.schema.numParts": "1",
         },
     }
@@ -365,30 +365,41 @@ def update_catalog_table(
         glue.update_table(DatabaseName=database, TableInput=table_input)
         logger.info("Catalog table updated: %s.%s", database, table_name)
     except glue.exceptions.EntityNotFoundException:
-        # Table doesn't exist in catalog yet — create it
         glue.create_table(DatabaseName=database, TableInput=table_input)
         logger.info("Catalog table created: %s.%s", database, table_name)
     except ClientError as exc:
-        logger.error("Catalog update failed for %s.%s — %s", database, table_name, exc)
+        # Log but do not re-raise — a catalog update failure must not fail
+        # the pipeline when data is already safely written to Delta.
+        logger.error(
+            "Catalog update failed for %s.%s — %s", database, table_name, exc
+        )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Helpers
-# ─────────────────────────────────────────────────────────────────────────────
+
+
+_EC2_METADATA_HOST = "http://169.254.169.254"
+
 
 def _get_region() -> str:
-    """Return the AWS region from EC2 instance metadata or default to us-east-1."""
+    """
+    Resolve the AWS region from EC2 IMDSv2 (Glue runs on EC2).
+    Falls back to us-east-1 if the metadata service is unreachable.
+    Uses IMDSv2 (token-gated) rather than the deprecated v1 path.
+    """
     try:
         import urllib.request
+
         token_req = urllib.request.Request(
-            "http://169.254.169.254/latest/api/token",
+            f"{_EC2_METADATA_HOST}/latest/api/token",
             headers={"X-aws-ec2-metadata-token-ttl-seconds": "10"},
             method="PUT",
         )
         with urllib.request.urlopen(token_req, timeout=2) as resp:
             token = resp.read().decode()
+
         region_req = urllib.request.Request(
-            "http://169.254.169.254/latest/meta-data/placement/region",
+            f"{_EC2_METADATA_HOST}/latest/meta-data/placement/region",
             headers={"X-aws-ec2-metadata-token": token},
         )
         with urllib.request.urlopen(region_req, timeout=2) as resp:
@@ -398,7 +409,7 @@ def _get_region() -> str:
 
 
 def s3_path(bucket: str, prefix: str, suffix: str = "") -> str:
-    """Construct a clean s3:// path, stripping double slashes."""
+    """Build a clean s3:// URI, stripping redundant slashes."""
     prefix = prefix.rstrip("/")
     if suffix:
         return f"s3://{bucket}/{prefix}/{suffix.lstrip('/')}"
@@ -406,7 +417,7 @@ def s3_path(bucket: str, prefix: str, suffix: str = "") -> str:
 
 
 def log_counts(label: str, total: int, valid: int, rejected: int) -> None:
-    """Emit a structured count summary log line."""
+    """Emit a one-line structured validation summary to CloudWatch."""
     logger.info(
         "%s | total_read=%d | valid=%d | rejected=%d | pass_rate=%.1f%%",
         label, total, valid, rejected,

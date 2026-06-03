@@ -43,6 +43,8 @@ from glue_jobs.utils.common import (
     log_counts,
     logger,
 )
+from glue_jobs.utils.monitor import PipelineMonitor
+from glue_jobs.utils.notifier import SnsNotifier
 
 # Schema
 PRODUCTS_SCHEMA = StructType([
@@ -171,7 +173,7 @@ def validate(df: DataFrame, args: dict, job_run_id: str) -> DataFrame:
 
 
 # Stage 3 — Delta MERGE (upsert)
-def merge_into_delta(spark, valid_df: DataFrame, args: dict) -> None:
+def merge_into_delta(spark, valid_df: DataFrame, args: dict) -> str:
     """
     Merge (upsert) the valid batch into the products Delta table.
 
@@ -230,58 +232,52 @@ def merge_into_delta(spark, valid_df: DataFrame, args: dict) -> None:
 
 # Main entrypoint
 def main():
-    # Initialise Spark and Glue
-    sc, glue_ctx, spark, job = build_spark_session(
+    _, _, spark, job = build_spark_session(
         getResolvedOptions(sys.argv, ["JOB_NAME"])["JOB_NAME"]
     )
 
-    # Parse all --ARG parameters
-    args = parse_args()
-
-    # Stable job run ID for correlating rejected records and logs
+    args       = parse_args()
     job_run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    monitor    = PipelineMonitor(
+        args["JOB_NAME"],
+        SnsNotifier(args["SNS_TOPIC_ARN"], args["ENVIRONMENT"]),
+    )
 
     try:
-        # Stage 1 — Read
-        raw_df = read_source(spark, args)
+        with monitor.stage("Read"):
+            raw_df = read_source(spark, args)
 
-        # Stage 2 — Validate
-        valid_df = validate(raw_df, args, job_run_id)
+        with monitor.stage("Validate"):
+            valid_df = validate(raw_df, args, job_run_id)
 
         if valid_df.count() == 0:
-            logger.warning(
-                "All rows in %s were rejected. No Delta merge will run.",
-                args["RAW_KEY"],
-            )
+            logger.warning("All rows in %s were rejected. No Delta merge.", args["RAW_KEY"])
             job.commit()
             return
 
-        # Stage 3 — Delta Merge
-        table_path = merge_into_delta(spark, valid_df, args)
+        with monitor.stage("Delta Merge"):
+            table_path = merge_into_delta(spark, valid_df, args)
 
-        # Stage 4 — Archive source file (only after successful merge)
-        archive_source_file(args)
+        with monitor.stage("Archive"):
+            archive_source_file(args)
 
-        # Stage 5 — Update Glue Data Catalog
-        update_catalog_table(
-            args=args,
-            table_name=TABLE_NAME,
-            table_path=table_path,
-            schema=PRODUCTS_SCHEMA,
-            partition_cols=args["PARTITION_COLS_LIST"],
-        )
+        with monitor.stage("Catalog Update"):
+            update_catalog_table(
+                args=args,
+                table_name=TABLE_NAME,
+                table_path=table_path,
+                schema=PRODUCTS_SCHEMA,
+                partition_cols=args["PARTITION_COLS_LIST"],
+            )
 
-        logger.info(
-            "products_job completed successfully | raw_key=%s | run_id=%s",
-            args["RAW_KEY"], job_run_id,
-        )
+        monitor.logSummary()
 
     except Exception as exc:
         logger.exception(
             "products_job FAILED | raw_key=%s | run_id=%s | error=%s",
             args.get("RAW_KEY", "unknown"), job_run_id, exc,
         )
-        raise  # Re-raise so Step Functions marks this job run as FAILED
+        raise
 
     finally:
         job.commit()

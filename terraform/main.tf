@@ -370,7 +370,7 @@ resource "aws_iam_role_policy" "sfn_glue" {
       {
         Sid    = "AthenaResultsS3"
         Effect = "Allow"
-        Action = ["s3:GetObject", "s3:PutObject", "s3:ListBucket"]
+        Action = ["s3:GetBucketLocation", "s3:GetObject", "s3:PutObject", "s3:ListBucket"]
         Resource = [
           aws_s3_bucket.athena_results.arn,
           "${aws_s3_bucket.athena_results.arn}/*"

@@ -23,6 +23,14 @@ data "archive_file" "glue_jobs_package" {
     content  = file("${path.module}/../glue_jobs/utils/common.py")
     filename = "glue_jobs/utils/common.py"
   }
+  source {
+    content  = file("${path.module}/../glue_jobs/utils/monitor.py")
+    filename = "glue_jobs/utils/monitor.py"
+  }
+  source {
+    content  = file("${path.module}/../glue_jobs/utils/notifier.py")
+    filename = "glue_jobs/utils/notifier.py"
+  }
 }
 
 resource "aws_s3_object" "glue_jobs_package" {
@@ -81,6 +89,7 @@ locals {
     "--SCRIPTS_BUCKET" = aws_s3_bucket.scripts.id
     "--ENVIRONMENT"    = var.environment
     "--DATABASE_NAME"  = var.glue_database_name
+    "--SNS_TOPIC_ARN"  = aws_sns_topic.pipeline_alerts.arn
   }
 }
 

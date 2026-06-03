@@ -49,6 +49,8 @@ from glue_jobs.utils.common import (
     log_counts,
     logger,
 )
+from glue_jobs.utils.monitor import PipelineMonitor
+from glue_jobs.utils.notifier import SnsNotifier
 
 # Schema
 
@@ -74,7 +76,7 @@ ORDERS_SCHEMA = StructType([
 ])
 
 # Expected timestamp format in the CSV
-TIMESTAMP_FORMAT = "yyyy-MM-dd HH:mm:ss"
+TIMESTAMP_FORMAT = "yyyy-MM-dd'T'HH:mm:ss"
 
 # Maximum amount allowed before soft-flagging (not hard reject)
 SOFT_FLAG_AMOUNT = 1_000_000.00
@@ -337,48 +339,45 @@ def merge_into_delta(spark, valid_df: DataFrame, args: dict) -> str:
 
 
 # Main entrypoint
-
 def main():
-    sc, glue_ctx, spark, job = build_spark_session(
+    _, _, spark, job = build_spark_session(
         getResolvedOptions(sys.argv, ["JOB_NAME"])["JOB_NAME"]
     )
-    args      = parse_args()
+    args       = parse_args()
     job_run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    monitor    = PipelineMonitor(
+        args["JOB_NAME"],
+        SnsNotifier(args["SNS_TOPIC_ARN"], args["ENVIRONMENT"]),
+    )
 
     try:
-        # Stage 1 — Read
-        raw_df = read_source(spark, args)
+        with monitor.stage("Read"):
+            raw_df = read_source(spark, args)
 
-        # Stage 2 — Validate
-        valid_df = validate(raw_df, args, job_run_id)
+        with monitor.stage("Validate"):
+            valid_df = validate(raw_df, args, job_run_id)
 
         if valid_df.count() == 0:
-            logger.warning(
-                "All rows in %s were rejected. No Delta merge will run.",
-                args["RAW_KEY"],
-            )
+            logger.warning("All rows in %s were rejected. No Delta merge.", args["RAW_KEY"])
             job.commit()
             return
 
-        # Stage 3 — Delta Merge
-        table_path = merge_into_delta(spark, valid_df, args)
+        with monitor.stage("Delta Merge"):
+            table_path = merge_into_delta(spark, valid_df, args)
 
-        # Stage 4 — Archive source file
-        archive_source_file(args)
+        with monitor.stage("Archive"):
+            archive_source_file(args)
 
-        # Stage 5 — Update Glue Data Catalog
-        update_catalog_table(
-            args=args,
-            table_name=TABLE_NAME,
-            table_path=table_path,
-            schema=ORDERS_SCHEMA,
-            partition_cols=args["PARTITION_COLS_LIST"],
-        )
+        with monitor.stage("Catalog Update"):
+            update_catalog_table(
+                args=args,
+                table_name=TABLE_NAME,
+                table_path=table_path,
+                schema=ORDERS_SCHEMA,
+                partition_cols=args["PARTITION_COLS_LIST"],
+            )
 
-        logger.info(
-            "orders_job completed successfully | raw_key=%s | run_id=%s",
-            args["RAW_KEY"], job_run_id,
-        )
+        monitor.logSummary()
 
     except Exception as exc:
         logger.exception(

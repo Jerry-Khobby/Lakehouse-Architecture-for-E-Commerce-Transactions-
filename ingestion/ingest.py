@@ -2,7 +2,7 @@
 ingest.py — Uploads local datasets to S3 to trigger the lakehouse ETL pipeline.
 
 Converts Excel source files (.xlsx) to CSV in memory, then uploads all three
-datasets to the data bucket's raw/ prefix.  EventBridge detects each upload
+datasets to the data bucket's raw/ prefix. EventBridge detects each upload
 and fires a separate Step Functions execution for that dataset.
 
 Prerequisites:
@@ -22,7 +22,9 @@ from pathlib import Path
 import boto3
 import openpyxl
 
-PROJECT_ROOT  = Path(__file__).parent.parent
+# Path(__file__).resolve() makes the path absolute before traversing so the
+# script works correctly regardless of which directory it is run from.
+PROJECT_ROOT  = Path(__file__).resolve().parent.parent
 DATA_DIR      = PROJECT_ROOT / "Data"
 TERRAFORM_DIR = PROJECT_ROOT / "terraform"
 
@@ -34,23 +36,32 @@ DATASETS = [
 
 
 def fetch_bucket_name() -> str:
-    result = subprocess.run(
-        ["terraform", "output", "-raw", "data_bucket_name"],
-        cwd=TERRAFORM_DIR,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return result.stdout.strip()
+    # Catch FileNotFoundError separately so a missing terraform binary gives a
+    # clear message instead of an unhandled exception traceback.
+    try:
+        result = subprocess.run(
+            ["terraform", "output", "-raw", "data_bucket_name"],
+            cwd=TERRAFORM_DIR,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return result.stdout.strip()
+    except FileNotFoundError:
+        print("ERROR: 'terraform' is not on your PATH. Install it or add it to PATH.")
+        sys.exit(1)
+    except subprocess.CalledProcessError as error:
+        print(f"ERROR: terraform output failed.\n{error.stderr}")
+        sys.exit(1)
 
 
 def xlsx_to_csv_bytes(path: Path) -> bytes:
     workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
     sheet    = workbook.active
     buffer   = io.StringIO()
-    writer   = csv.writer(buffer)
+    writer   = csv.writer(buffer, lineterminator="\n")
     for row in sheet.iter_rows(values_only=True):
-        writer.writerow(row)
+        writer.writerow(["" if cell is None else cell for cell in row])
     workbook.close()
     return buffer.getvalue().encode("utf-8")
 
@@ -64,17 +75,13 @@ def load_dataset(filename: str) -> bytes:
 
 def upload_dataset(s3_client, bucket: str, filename: str, s3_key: str) -> None:
     payload = load_dataset(filename)
-    s3_client.put_object(Bucket=bucket, Key=s3_key, Body=payload)
+    s3_client.put_object(Bucket=bucket, Key=s3_key, Body=payload, ContentType="text/csv")
     print(f"  uploaded  s3://{bucket}/{s3_key}  ({len(payload) / 1024:.1f} KB)")
 
 
 def main() -> None:
     print("Reading data bucket name from Terraform output ...")
-    try:
-        bucket = fetch_bucket_name()
-    except subprocess.CalledProcessError as error:
-        print(f"ERROR: terraform output failed.\n{error.stderr}")
-        sys.exit(1)
+    bucket = fetch_bucket_name()
 
     print(f"Target bucket : {bucket}")
     print(f"Datasets      : {len(DATASETS)}\n")

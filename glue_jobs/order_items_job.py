@@ -46,7 +46,7 @@ from delta.tables import DeltaTable
 
 from awsglue.utils import getResolvedOptions
 
-from  glue_jobs.utils.common import (
+from glue_jobs.utils.common import (
     build_spark_session,
     parse_args,
     write_rejected,
@@ -57,6 +57,8 @@ from  glue_jobs.utils.common import (
     log_counts,
     logger,
 )
+from glue_jobs.utils.monitor import PipelineMonitor
+from glue_jobs.utils.notifier import SnsNotifier
 
 
 # Schema
@@ -88,7 +90,7 @@ ORDER_ITEMS_SCHEMA = StructType([
     StructField("date",                   DateType(),      nullable=False),
 ])
 
-TIMESTAMP_FORMAT         = "yyyy-MM-dd HH:mm:ss"
+TIMESTAMP_FORMAT         = "yyyy-MM-dd'T'HH:mm:ss"
 FUTURE_TOLERANCE_HOURS   = 1
 MAX_DAYS_SINCE_PRIOR     = 365
 
@@ -166,6 +168,58 @@ def _cast_numeric_fields(df: DataFrame, args: dict, job_run_id: str) -> DataFram
     )
 
     return df
+
+
+def _filterByProductRef(
+    valid_df: DataFrame,
+    spark: SparkSession,
+    args: dict,
+    job_run_id: str,
+) -> DataFrame:
+    """Reject rows whose product_id does not exist in the products Delta table."""
+    products_path = s3_path(args["DATA_BUCKET"], args["PROCESSED_PREFIX"], "products")
+    if not DeltaTable.isDeltaTable(spark, products_path):
+        logger.warning(
+            "Products Delta table not found at %s — skipping product_id referential check.",
+            products_path,
+        )
+        return valid_df
+
+    known = (
+        spark.read.format("delta").load(products_path)
+        .select(F.col("product_id").alias("_known_pid"))
+        .distinct()
+    )
+    unknown = valid_df.join(known, valid_df["product_id"] == known["_known_pid"], how="left_anti")
+    if unknown.count() > 0:
+        write_rejected(unknown, args, job_run_id, "unknown_product_id")
+    return valid_df.join(known, valid_df["product_id"] == known["_known_pid"], how="inner").drop("_known_pid")
+
+
+def _filterByOrderRef(
+    valid_df: DataFrame,
+    spark: SparkSession,
+    args: dict,
+    job_run_id: str,
+) -> DataFrame:
+    """Reject rows whose order_id does not exist in the orders Delta table."""
+    orders_path = s3_path(args["DATA_BUCKET"], args["PROCESSED_PREFIX"], "orders")
+    if not DeltaTable.isDeltaTable(spark, orders_path):
+        logger.warning(
+            "Orders Delta table not found at %s — skipping order_id referential check.",
+            orders_path,
+        )
+        return valid_df
+
+    known = (
+        spark.read.format("delta").load(orders_path)
+        .select(F.col("order_id").alias("_known_oid"))
+        .distinct()
+    )
+    unknown = valid_df.join(known, valid_df["order_id"] == known["_known_oid"], how="left_anti")
+    if unknown.count() > 0:
+        write_rejected(unknown, args, job_run_id, "unknown_order_id")
+    return valid_df.join(known, valid_df["order_id"] == known["_known_oid"], how="inner").drop("_known_oid")
 
 
 def validate(df: DataFrame, args: dict, job_run_id: str, spark: SparkSession) -> DataFrame:
@@ -298,59 +352,8 @@ def validate(df: DataFrame, args: dict, job_run_id: str, spark: SparkSession) ->
         )
     valid_df = valid_df.drop("date", "_date_derived").withColumnRenamed("_date_cast", "date")
 
-    # ── Check 12: referential integrity — product_id ──────────────────────
-    products_path = s3_path(args["DATA_BUCKET"], args["PROCESSED_PREFIX"], "products")
-    if DeltaTable.isDeltaTable(spark, products_path):
-        known_products = (
-            spark.read.format("delta").load(products_path)
-            .select(F.col("product_id").alias("_known_pid"))
-            .distinct()
-        )
-        # Left anti-join: rows in valid_df whose product_id is NOT in products
-        unknown_products = valid_df.join(
-            known_products,
-            valid_df["product_id"] == known_products["_known_pid"],
-            how="left_anti",
-        )
-        if unknown_products.count() > 0:
-            write_rejected(unknown_products, args, job_run_id, "unknown_product_id")
-        # Keep only rows where product_id is known
-        valid_df = valid_df.join(
-            known_products,
-            valid_df["product_id"] == known_products["_known_pid"],
-            how="inner",
-        ).drop("_known_pid")
-    else:
-        logger.warning(
-            "Products Delta table not found at %s — skipping referential check for product_id.",
-            products_path,
-        )
-
-    # ── Check 13: referential integrity — order_id ────────────────────────
-    orders_path = s3_path(args["DATA_BUCKET"], args["PROCESSED_PREFIX"], "orders")
-    if DeltaTable.isDeltaTable(spark, orders_path):
-        known_orders = (
-            spark.read.format("delta").load(orders_path)
-            .select(F.col("order_id").alias("_known_oid"))
-            .distinct()
-        )
-        unknown_orders = valid_df.join(
-            known_orders,
-            valid_df["order_id"] == known_orders["_known_oid"],
-            how="left_anti",
-        )
-        if unknown_orders.count() > 0:
-            write_rejected(unknown_orders, args, job_run_id, "unknown_order_id")
-        valid_df = valid_df.join(
-            known_orders,
-            valid_df["order_id"] == known_orders["_known_oid"],
-            how="inner",
-        ).drop("_known_oid")
-    else:
-        logger.warning(
-            "Orders Delta table not found at %s — skipping referential check for order_id.",
-            orders_path,
-        )
+    valid_df = _filterByProductRef(valid_df, spark, args, job_run_id)
+    valid_df = _filterByOrderRef(valid_df, spark, args, job_run_id)
 
     # ── Check 14: intra-batch deduplication ───────────────────────────────
     # Composite key dedup: (id, order_id) — keep the record with the latest
@@ -438,46 +441,44 @@ def merge_into_delta(spark, valid_df: DataFrame, args: dict) -> str:
 
 # Main entrypoint
 def main():
-    sc, glue_ctx, spark, job = build_spark_session(
+    _, _, spark, job = build_spark_session(
         getResolvedOptions(sys.argv, ["JOB_NAME"])["JOB_NAME"]
     )
     args       = parse_args()
     job_run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    monitor    = PipelineMonitor(
+        args["JOB_NAME"],
+        SnsNotifier(args["SNS_TOPIC_ARN"], args["ENVIRONMENT"]),
+    )
 
     try:
-        # Stage 1 — Read
-        raw_df = read_source(spark, args)
+        with monitor.stage("Read"):
+            raw_df = read_source(spark, args)
 
-        # Stage 2 — Validate (passes spark for referential integrity checks)
-        valid_df = validate(raw_df, args, job_run_id, spark)
+        with monitor.stage("Validate"):
+            valid_df = validate(raw_df, args, job_run_id, spark)
 
         if valid_df.count() == 0:
-            logger.warning(
-                "All rows in %s were rejected. No Delta merge will run.",
-                args["RAW_KEY"],
-            )
+            logger.warning("All rows in %s were rejected. No Delta merge.", args["RAW_KEY"])
             job.commit()
             return
 
-        # Stage 3 — Delta Merge
-        table_path = merge_into_delta(spark, valid_df, args)
+        with monitor.stage("Delta Merge"):
+            table_path = merge_into_delta(spark, valid_df, args)
 
-        # Stage 4 — Archive source file
-        archive_source_file(args)
+        with monitor.stage("Archive"):
+            archive_source_file(args)
 
-        # Stage 5 — Update Glue Data Catalog
-        update_catalog_table(
-            args=args,
-            table_name=TABLE_NAME,
-            table_path=table_path,
-            schema=ORDER_ITEMS_SCHEMA,
-            partition_cols=args["PARTITION_COLS_LIST"],
-        )
+        with monitor.stage("Catalog Update"):
+            update_catalog_table(
+                args=args,
+                table_name=TABLE_NAME,
+                table_path=table_path,
+                schema=ORDER_ITEMS_SCHEMA,
+                partition_cols=args["PARTITION_COLS_LIST"],
+            )
 
-        logger.info(
-            "order_items_job completed successfully | raw_key=%s | run_id=%s",
-            args["RAW_KEY"], job_run_id,
-        )
+        monitor.logSummary()
 
     except Exception as exc:
         logger.exception(
