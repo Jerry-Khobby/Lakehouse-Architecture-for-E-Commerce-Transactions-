@@ -82,6 +82,12 @@ locals {
     "--enable-glue-datacatalog"          = "true"
     "--conf"                             = "spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog"
     "--datalake-formats"                 = "delta"
+    # Spark staging area for shuffle spill and Delta merge commit staging.
+    # Must point to a bucket where the Glue role has full read/write/delete.
+    # The data bucket satisfies this — scripts and logs buckets do not.
+    # Without this, Glue passes an empty string to Hadoop's Path constructor,
+    # causing: IllegalArgumentException: Can not create a Path from an empty string
+    "--TempDir"        = "s3://${aws_s3_bucket.data.id}/glue-temp/"
     # Makes `from glue_jobs.utils.common import ...` resolvable in the Glue runtime
     "--extra-py-files" = "s3://${aws_s3_bucket.scripts.id}/glue_jobs/glue_jobs.zip"
     # Runtime parameters — overridden per execution by Step Functions
