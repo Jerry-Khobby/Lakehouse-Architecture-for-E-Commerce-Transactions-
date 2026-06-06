@@ -134,6 +134,14 @@ resource "aws_s3_bucket_lifecycle_configuration" "data" {
     filter { prefix = var.rejected_data_prefix }
     expiration { days = 60 }
   }
+
+  # Soft-flagged records: expire after 90 days (kept longer for analyst review)
+  rule {
+    id     = "expire-flagged"
+    status = "Enabled"
+    filter { prefix = var.flagged_data_prefix }
+    expiration { days = 90 }
+  }
 }
 
 # Logical "folders" — Terraform objects ensure prefixes exist before Glue runs
@@ -158,6 +166,12 @@ resource "aws_s3_object" "archived_prefix" {
 resource "aws_s3_object" "rejected_prefix" {
   bucket  = aws_s3_bucket.data.id
   key     = var.rejected_data_prefix
+  content = ""
+}
+
+resource "aws_s3_object" "flagged_prefix" {
+  bucket  = aws_s3_bucket.data.id
+  key     = var.flagged_data_prefix
   content = ""
 }
 
@@ -614,7 +628,11 @@ resource "aws_cloudwatch_event_rule" "s3_raw_ingest" {
     detail-type = ["Object Created"]
     detail = {
       bucket = { name = [aws_s3_bucket.data.id] }
-      object = { key = [{ prefix = var.raw_data_prefix }] }
+      # Combining prefix + suffix in one filter object applies AND logic in
+      # EventBridge. This prevents the empty "raw/" prefix-marker object that
+      # Terraform creates (aws_s3_object.raw_prefix) from triggering spurious
+      # Step Functions executions on every terraform apply.
+      object = { key = [{ prefix = var.raw_data_prefix, suffix = ".csv" }] }
     }
   })
 }

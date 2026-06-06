@@ -80,7 +80,11 @@ locals {
     "--spark-event-logs-path"            = "s3://${aws_s3_bucket.logs.id}/spark-ui-logs/"
     "--enable-job-insights"              = "true"
     "--enable-glue-datacatalog"          = "true"
-    "--conf"                             = "spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog"
+    # --datalake-formats delta instructs Glue 4.0 to automatically activate the
+    # Delta Lake connector, register DeltaSparkSessionExtension, and configure
+    # the DeltaCatalog. No manual --conf entries are needed or safe here —
+    # passing a second --conf value for the same key in a Terraform map is
+    # unsupported and causes Spark to receive a malformed extension string.
     "--datalake-formats"                 = "delta"
     # Spark staging area for shuffle spill and Delta merge commit staging.
     # Must point to a bucket where the Glue role has full read/write/delete.
@@ -91,11 +95,12 @@ locals {
     # Makes `from glue_jobs.utils.common import ...` resolvable in the Glue runtime
     "--extra-py-files" = "s3://${aws_s3_bucket.scripts.id}/glue_jobs/glue_jobs.zip"
     # Runtime parameters — overridden per execution by Step Functions
-    "--DATA_BUCKET"    = aws_s3_bucket.data.id
-    "--SCRIPTS_BUCKET" = aws_s3_bucket.scripts.id
-    "--ENVIRONMENT"    = var.environment
-    "--DATABASE_NAME"  = var.glue_database_name
-    "--SNS_TOPIC_ARN"  = aws_sns_topic.pipeline_alerts.arn
+    "--DATA_BUCKET"      = aws_s3_bucket.data.id
+    "--SCRIPTS_BUCKET"   = aws_s3_bucket.scripts.id
+    "--ENVIRONMENT"      = var.environment
+    "--DATABASE_NAME"    = var.glue_database_name
+    "--SNS_TOPIC_ARN"    = aws_sns_topic.pipeline_alerts.arn
+    "--FLAGGED_PREFIX"   = var.flagged_data_prefix
   }
 }
 

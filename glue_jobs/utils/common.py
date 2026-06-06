@@ -88,6 +88,7 @@ REQUIRED_ARGS = [
     "PROCESSED_PREFIX",
     "ARCHIVED_PREFIX",
     "REJECTED_PREFIX",
+    "FLAGGED_PREFIX",   # soft-flagged records that pass but need analyst review
     "MERGE_KEYS",       # comma-separated e.g. "order_id" or "id,order_id"
     "PARTITION_COLS",   # comma-separated e.g. "date" or "department"
     "SNS_TOPIC_ARN",    # SNS topic for stage-level alerts
@@ -212,12 +213,12 @@ def archive_source_file(args: dict) -> None:
         )
         logger.info("Deleted source: s3://%s/%s", bucket, source_key)
 
-    except ClientError as exc:
+    except ClientError:
         # Log but do not re-raise: a failed archive must not fail the pipeline
         # when the Delta write already committed successfully.
-        logger.error(
-            "Archive step failed for s3://%s/%s — %s",
-            bucket, source_key, exc,
+        logger.exception(
+            "Archive step failed for s3://%s/%s",
+            bucket, source_key,
         )
 
 
@@ -358,6 +359,11 @@ def update_catalog_table(
             "classification":                    "delta",
             "spark.sql.sources.provider":        "delta",
             "spark.sql.sources.schema.numParts": "1",
+            # Delta protocol version markers — Athena engine v3 reads these
+            # from the table Parameters to confirm Delta Lake compatibility
+            # before falling back to the _delta_log/ transaction log.
+            "delta.minReaderVersion":            "1",
+            "delta.minWriterVersion":            "2",
         },
     }
 
@@ -367,18 +373,17 @@ def update_catalog_table(
     except glue.exceptions.EntityNotFoundException:
         glue.create_table(DatabaseName=database, TableInput=table_input)
         logger.info("Catalog table created: %s.%s", database, table_name)
-    except ClientError as exc:
+    except ClientError:
         # Log but do not re-raise — a catalog update failure must not fail
         # the pipeline when data is already safely written to Delta.
-        logger.error(
-            "Catalog update failed for %s.%s — %s", database, table_name, exc
-        )
+        logger.exception("Catalog update failed for %s.%s", database, table_name)
 
 
 # Helpers
 
 
-_EC2_METADATA_HOST = "http://169.254.169.254"
+# EC2 IMDSv2 link-local address — intentional, not a configurable host.
+_EC2_METADATA_HOST = "http://169.254.169.254"  # noqa: S1313
 
 
 def _get_region() -> str:

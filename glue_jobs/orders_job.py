@@ -185,7 +185,8 @@ def validate(df: DataFrame, args: dict, job_run_id: str) -> DataFrame:
     large_amt = valid_df.filter(F.col("total_amount") > SOFT_FLAG_AMOUNT)
     if large_amt.count() > 0:
         flagged_path = (
-            f"s3://{args['DATA_BUCKET']}/flagged/orders/{job_run_id}/"
+            f"s3://{args['DATA_BUCKET']}/"
+            f"{args['FLAGGED_PREFIX'].rstrip('/')}/orders/{job_run_id}/"
         )
         large_amt.withColumn("flag_reason", F.lit("large_amount")).write.mode("append").parquet(flagged_path)
         logger.warning(
@@ -359,7 +360,6 @@ def main():
 
         if valid_df.count() == 0:
             logger.warning("All rows in %s were rejected. No Delta merge.", args["RAW_KEY"])
-            job.commit()
             return
 
         with monitor.stage("Delta Merge"):

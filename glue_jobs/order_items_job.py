@@ -170,7 +170,7 @@ def _cast_numeric_fields(df: DataFrame, args: dict, job_run_id: str) -> DataFram
     return df
 
 
-def _filterByProductRef(
+def _filter_by_product_ref(
     valid_df: DataFrame,
     spark: SparkSession,
     args: dict,
@@ -196,7 +196,7 @@ def _filterByProductRef(
     return valid_df.join(known, valid_df["product_id"] == known["_known_pid"], how="inner").drop("_known_pid")
 
 
-def _filterByOrderRef(
+def _filter_by_order_ref(
     valid_df: DataFrame,
     spark: SparkSession,
     args: dict,
@@ -352,8 +352,8 @@ def validate(df: DataFrame, args: dict, job_run_id: str, spark: SparkSession) ->
         )
     valid_df = valid_df.drop("date", "_date_derived").withColumnRenamed("_date_cast", "date")
 
-    valid_df = _filterByProductRef(valid_df, spark, args, job_run_id)
-    valid_df = _filterByOrderRef(valid_df, spark, args, job_run_id)
+    valid_df = _filter_by_product_ref(valid_df, spark, args, job_run_id)
+    valid_df = _filter_by_order_ref(valid_df, spark, args, job_run_id)
 
     # ── Check 14: intra-batch deduplication ───────────────────────────────
     # Composite key dedup: (id, order_id) — keep the record with the latest
@@ -460,7 +460,6 @@ def main():
 
         if valid_df.count() == 0:
             logger.warning("All rows in %s were rejected. No Delta merge.", args["RAW_KEY"])
-            job.commit()
             return
 
         with monitor.stage("Delta Merge"):

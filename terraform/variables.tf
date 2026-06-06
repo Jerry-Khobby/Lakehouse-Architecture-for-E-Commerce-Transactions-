@@ -53,6 +53,12 @@ variable "rejected_data_prefix" {
   default     = "rejected/"
 }
 
+variable "flagged_data_prefix" {
+  description = "S3 prefix for soft-flagged records that pass but require analyst review"
+  type        = string
+  default     = "flagged/"
+}
+
 variable "log_retention_days" {
   description = "Days to retain S3 access logs"
   type        = number
@@ -96,14 +102,6 @@ variable "glue_timeout_minutes" {
   default     = 60
 }
 
-variable "delta_lake_jar_path" {
-  description = "S3 path to the Delta Lake connector JAR for Glue 4.0"
-  type        = string
-  # Download from: https://github.com/delta-io/delta/releases
-  # Glue 4.0 uses Spark 3.3 → delta-core_2.12-2.3.0.jar
-  default     = "s3://aws-glue-studio-transforms-510798373988-prod-us-east-1/delta-core_2.12-2.3.0.jar"
-}
-
 # ── Glue Catalog ──────────────────────────────────────────────────────────────
 variable "glue_database_name" {
   description = "Glue Data Catalog database name"
@@ -145,7 +143,8 @@ variable "alert_email" {
 }
 
 variable "slack_webhook_url" {
-  description = "Slack incoming-webhook URL for pipeline alerts"
+  description = "Slack incoming-webhook URL for pipeline alerts (optional)"
   type        = string
   sensitive   = true
+  default     = ""
 }

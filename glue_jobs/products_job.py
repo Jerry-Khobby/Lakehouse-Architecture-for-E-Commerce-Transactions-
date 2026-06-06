@@ -252,7 +252,6 @@ def main():
 
         if valid_df.count() == 0:
             logger.warning("All rows in %s were rejected. No Delta merge.", args["RAW_KEY"])
-            job.commit()
             return
 
         with monitor.stage("Delta Merge"):
