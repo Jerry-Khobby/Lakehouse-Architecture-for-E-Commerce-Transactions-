@@ -1,0 +1,8 @@
+# Local development and CI test dependencies.
+# PySpark 3.3.x matches Glue 4.0's Spark runtime.
+# delta-spark is NOT listed here — unit tests mock DeltaTable so no JAR is needed.
+# Only install delta-spark for integration tests that write real Delta tables locally.
+pyspark==3.3.2
+pytest==8.3.5
+pytest-cov==6.0.0
+ruff==0.9.6

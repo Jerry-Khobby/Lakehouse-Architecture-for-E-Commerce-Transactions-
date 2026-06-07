@@ -1,0 +1,91 @@
+name: Deploy
+
+# Runs only on direct pushes to main (not on pull requests).
+# The deploy job uploads Glue ETL scripts to S3 so that the next
+# Step Functions execution picks up the latest code automatically.
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy-glue-scripts:
+    name: Deploy Glue Scripts to S3
+    runs-on: ubuntu-latest
+
+    # Required GitHub repository secrets:
+    #   AWS_ACCESS_KEY_ID      — IAM user key with s3:PutObject on the scripts bucket
+    #   AWS_SECRET_ACCESS_KEY  — Corresponding secret key
+    #   AWS_REGION             — e.g. us-east-1
+    #   SCRIPTS_BUCKET         — e.g. ecom-lakehouse-dev-scripts-<account_id>
+    #                            Run: terraform output scripts_bucket_name
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ secrets.AWS_REGION }}
+
+      # ── Package glue_jobs/ utilities into a zip ──────────────────────────────
+      # The zip must contain glue_jobs/ at the root so that
+      #   from glue_jobs.utils.common import ...
+      # resolves correctly inside the Glue Python runtime.
+      # This replicates what Terraform's archive_file data source produces.
+      - name: Package glue_jobs utilities zip
+        run: |
+          STAGING=$(mktemp -d)
+          mkdir -p "$STAGING/glue_jobs/utils"
+          cp glue_jobs/__init__.py             "$STAGING/glue_jobs/"
+          cp glue_jobs/utils/__init__.py       "$STAGING/glue_jobs/utils/"
+          cp glue_jobs/utils/common.py         "$STAGING/glue_jobs/utils/"
+          cp glue_jobs/utils/monitor.py        "$STAGING/glue_jobs/utils/"
+          cp glue_jobs/utils/notifier.py       "$STAGING/glue_jobs/utils/"
+          cd "$STAGING" && zip -r "$GITHUB_WORKSPACE/glue_jobs.zip" glue_jobs/
+          echo "Zip contents:"
+          unzip -l "$GITHUB_WORKSPACE/glue_jobs.zip"
+
+      # ── Upload job entry-point scripts ───────────────────────────────────────
+      - name: Upload Glue job scripts
+        env:
+          SCRIPTS_BUCKET: ${{ secrets.SCRIPTS_BUCKET }}
+        run: |
+          aws s3 cp glue_jobs/products_job.py    "s3://$SCRIPTS_BUCKET/glue_jobs/products_job.py"
+          aws s3 cp glue_jobs/orders_job.py      "s3://$SCRIPTS_BUCKET/glue_jobs/orders_job.py"
+          aws s3 cp glue_jobs/order_items_job.py "s3://$SCRIPTS_BUCKET/glue_jobs/order_items_job.py"
+          aws s3 cp glue_jobs.zip                "s3://$SCRIPTS_BUCKET/glue_jobs/glue_jobs.zip"
+
+      # ── Confirm all four objects are present ─────────────────────────────────
+      - name: Verify uploaded objects
+        env:
+          SCRIPTS_BUCKET: ${{ secrets.SCRIPTS_BUCKET }}
+        run: |
+          echo "Objects in s3://$SCRIPTS_BUCKET/glue_jobs/"
+          aws s3 ls "s3://$SCRIPTS_BUCKET/glue_jobs/"
+
+      # ── Export Step Functions definition for audit trail ─────────────────────
+      # Writes the current state machine ASL JSON to the workflow summary so
+      # reviewers can inspect the orchestration definition without opening AWS.
+      - name: Export Step Functions definition
+        env:
+          SCRIPTS_BUCKET: ${{ secrets.SCRIPTS_BUCKET }}
+          AWS_REGION:     ${{ secrets.AWS_REGION }}
+        run: |
+          SFN_NAME="ecom-lakehouse-dev-etl-pipeline"
+          SFN_ARN=$(aws stepfunctions list-state-machines \
+            --query "stateMachines[?name=='$SFN_NAME'].stateMachineArn" \
+            --output text 2>/dev/null || echo "")
+          if [ -n "$SFN_ARN" ]; then
+            aws stepfunctions describe-state-machine \
+              --state-machine-arn "$SFN_ARN" \
+              --query "definition" \
+              --output text > step_functions_definition.json
+            echo "### Step Functions definition" >> "$GITHUB_STEP_SUMMARY"
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            cat step_functions_definition.json >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "State machine $SFN_NAME not found — skipping export."
+          fi
