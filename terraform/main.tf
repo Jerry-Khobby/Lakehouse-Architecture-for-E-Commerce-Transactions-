@@ -287,9 +287,9 @@ resource "aws_iam_role_policy" "glue_s3" {
         ]
       },
       {
-        Sid    = "LogsBucketWrite"
-        Effect = "Allow"
-        Action = ["s3:PutObject"]
+        Sid      = "LogsBucketWrite"
+        Effect   = "Allow"
+        Action   = ["s3:PutObject"]
         Resource = ["${aws_s3_bucket.logs.arn}/*"]
       }
     ]
@@ -391,9 +391,9 @@ resource "aws_iam_role_policy" "sfn_glue" {
         ]
       },
       {
-        Sid    = "SNSPublish"
-        Effect = "Allow"
-        Action = ["sns:Publish"]
+        Sid      = "SNSPublish"
+        Effect   = "Allow"
+        Action   = ["sns:Publish"]
         Resource = [aws_sns_topic.pipeline_alerts.arn]
       },
       {

@@ -437,9 +437,9 @@ resource "aws_sfn_state_machine" "etl_pipeline" {
         Choices = [
           {
             # After PreserveKey ran: $.source exists → use $.source.originalKey
-            Variable      = "$.source.originalKey"
-            IsPresent     = true
-            Next          = "PublishFailureWithKey"
+            Variable  = "$.source.originalKey"
+            IsPresent = true
+            Next      = "PublishFailureWithKey"
           }
         ]
         # Before PreserveKey ran (Glue job failed before routing through it):

@@ -24,7 +24,6 @@ Delta path : s3://<DATA>/<PROCESSED_PREFIX>orders/
 """
 
 import sys
-import logging
 from datetime import datetime, timezone, timedelta
 
 from pyspark.sql import DataFrame
