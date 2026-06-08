@@ -111,7 +111,6 @@ def validate(df: DataFrame, args: dict, job_run_id: str) -> DataFrame:
       - Unique product_id within this batch (one row per product)
     """
     total = df.count()
-    rejected_frames = []
 
     # ── Check 1: null primary key ──────────────────────────────────────────
     null_pk = df.filter(F.col("product_id").isNull())
@@ -119,7 +118,6 @@ def validate(df: DataFrame, args: dict, job_run_id: str) -> DataFrame:
 
     if null_pk.count() > 0:
         write_rejected(null_pk, args, job_run_id, "null_product_id")
-        rejected_frames.append(null_pk)
 
     # ── Check 2: null required fields ─────────────────────────────────────
     required_fields = ["department_id", "department", "product_name"]
@@ -127,14 +125,12 @@ def validate(df: DataFrame, args: dict, job_run_id: str) -> DataFrame:
         null_rows = valid_df.filter(F.col(col).isNull())
         if null_rows.count() > 0:
             write_rejected(null_rows, args, job_run_id, f"null_required_field:{col}")
-            rejected_frames.append(null_rows)
         valid_df = valid_df.filter(F.col(col).isNotNull())
 
     # ── Check 3: invalid ID values (must be positive integers > 0) ────────
     invalid_ids = valid_df.filter((F.col("product_id") <= 0) | (F.col("department_id") <= 0))
     if invalid_ids.count() > 0:
         write_rejected(invalid_ids, args, job_run_id, "invalid_id_value")
-        rejected_frames.append(invalid_ids)
     valid_df = valid_df.filter((F.col("product_id") > 0) & (F.col("department_id") > 0))
 
     # ── Check 4: empty or whitespace-only string fields ───────────────────
@@ -143,7 +139,6 @@ def validate(df: DataFrame, args: dict, job_run_id: str) -> DataFrame:
         empty_rows = valid_df.filter(F.trim(F.col(col)) == "")
         if empty_rows.count() > 0:
             write_rejected(empty_rows, args, job_run_id, f"empty_string_field:{col}")
-            rejected_frames.append(empty_rows)
         valid_df = valid_df.filter(F.trim(F.col(col)) != "")
 
     # Trim whitespace from string columns now that empties are removed
@@ -151,9 +146,15 @@ def validate(df: DataFrame, args: dict, job_run_id: str) -> DataFrame:
     valid_df = valid_df.withColumn("product_name", F.trim(F.col("product_name")))
 
     # ── Check 5: intra-batch deduplication ────────────────────────────────
-    # Keep the first occurrence within this file per product_id.
-    # Subsequent duplicates go to rejected/ for audit visibility.
-    window = Window.partitionBy("product_id").orderBy(F.monotonically_increasing_id())
+    # Keep one row per product_id. Products has no recency column, so order by
+    # the dimension attributes for a STABLE, reproducible choice — re-running
+    # the same file always keeps the same row. (monotonically_increasing_id()
+    # encodes the Spark partition index, so it is not reproducible across
+    # re-runs or repartitioning.) Subsequent duplicates go to rejected/.
+    window = Window.partitionBy("product_id").orderBy(
+        F.col("department_id"),
+        F.col("product_name"),
+    )
     ranked = valid_df.withColumn("_row_rank", F.row_number().over(window))
 
     intra_dupes = ranked.filter(F.col("_row_rank") > 1).drop("_row_rank")
@@ -214,7 +215,16 @@ def merge_into_delta(spark, valid_df: DataFrame, args: dict) -> str:
             valid_df.alias("source"),
             "target.product_id = source.product_id",
         )
-        .whenMatchedUpdateAll()  # dimension update — always take latest value
+        # Dimension update — take the latest value, but only when an attribute
+        # actually changed so that re-running an identical batch is a true
+        # no-op and does not append empty commits to the Delta log.
+        .whenMatchedUpdateAll(
+            condition=(
+                "source.department_id <> target.department_id "
+                "OR source.department <> target.department "
+                "OR source.product_name <> target.product_name"
+            )
+        )
         .whenNotMatchedInsertAll()  # new product — insert it
         .execute()
     )
@@ -264,7 +274,7 @@ def main():
                 partition_cols=args["PARTITION_COLS_LIST"],
             )
 
-        monitor.logSummary()
+        monitor.log_summary()
 
     except Exception as exc:
         logger.exception(

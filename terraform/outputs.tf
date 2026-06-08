@@ -83,6 +83,12 @@ output "sfn_role_arn" {
   value       = aws_iam_role.sfn_role.arn
 }
 
+# ── IAM (ingestion) ───────────────────────────────────────────────────────────
+output "ingestion_policy_arn" {
+  description = "Least-privilege managed policy for the principal that runs ingest.py — attach it to that developer/CI user or role"
+  value       = aws_iam_policy.ingestion.arn
+}
+
 # ── Useful deploy commands ────────────────────────────────────────────────────
 output "deploy_scripts_command" {
   description = "AWS CLI command to sync glue_jobs/ scripts to S3 after terraform apply"
@@ -90,6 +96,6 @@ output "deploy_scripts_command" {
 }
 
 output "manual_sfn_trigger_command" {
-  description = "AWS CLI command to manually trigger the pipeline for testing"
-  value       = "aws stepfunctions start-execution --state-machine-arn ${aws_sfn_state_machine.etl_pipeline.arn} --input '{\"bucket\":\"${aws_s3_bucket.data.id}\",\"key\":\"raw/test.csv\"}'"
+  description = "AWS CLI command to manually trigger the pipeline with the structured batch input (matches ingest.py)"
+  value       = "aws stepfunctions start-execution --state-machine-arn ${aws_sfn_state_machine.etl_pipeline.arn} --input '{\"bucket\":\"${aws_s3_bucket.data.id}\",\"batch\":\"manual_test\",\"files\":{\"products\":\"raw/products.csv\",\"orders\":\"raw/orders_apr_2025.csv\",\"order_items\":\"raw/order_items_apr_2025.csv\"}}'"
 }

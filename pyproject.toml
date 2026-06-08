@@ -2,11 +2,9 @@
 testpaths = ["tests"]
 pythonpath = ["."]
 
-[tool.coverage.run]
-omit = [
-    "glue_jobs/utils/monitor.py",
-    "glue_jobs/utils/notifier.py",
-]
+# monitor.py and notifier.py used to be omitted from coverage; they now have
+# dedicated unit tests (tests/test_monitor.py, tests/test_notifier.py) and are
+# measured like the rest of glue_jobs/.
 
 [tool.black]
 line-length = 120

@@ -1,0 +1,9 @@
+# Copy to terraform.tfvars and fill in. NEVER commit terraform.tfvars (gitignored).
+# In CI/production, prefer passing secrets via environment variables
+# (e.g. TF_VAR_slack_webhook_url) or a secrets store over a plaintext file.
+
+alert_email = "you@example.com"
+
+# Optional Slack incoming-webhook URL for pipeline alerts. Leave empty here and
+# inject at apply time:  export TF_VAR_slack_webhook_url="https://hooks.slack..."
+slack_webhook_url = ""

@@ -235,6 +235,39 @@ resource "aws_s3_bucket_lifecycle_configuration" "athena_results" {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# S3 BUCKET POLICIES — deny any request not made over TLS
+# A baseline control: reject s3 actions when aws:SecureTransport is false so
+# data can never be read or written in plaintext over the wire. The condition
+# is a Deny, not a public grant, so it coexists with the public-access blocks.
+# ─────────────────────────────────────────────────────────────────────────────
+
+locals {
+  tls_only_buckets = {
+    data           = { id = aws_s3_bucket.data.id, arn = aws_s3_bucket.data.arn }
+    scripts        = { id = aws_s3_bucket.scripts.id, arn = aws_s3_bucket.scripts.arn }
+    athena_results = { id = aws_s3_bucket.athena_results.id, arn = aws_s3_bucket.athena_results.arn }
+    logs           = { id = aws_s3_bucket.logs.id, arn = aws_s3_bucket.logs.arn }
+  }
+}
+
+resource "aws_s3_bucket_policy" "tls_only" {
+  for_each = local.tls_only_buckets
+  bucket   = each.value.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid       = "DenyInsecureTransport"
+      Effect    = "Deny"
+      Principal = "*"
+      Action    = "s3:*"
+      Resource  = [each.value.arn, "${each.value.arn}/*"]
+      Condition = { Bool = { "aws:SecureTransport" = "false" } }
+    }]
+  })
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # IAM
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -367,19 +400,57 @@ resource "aws_iam_role_policy" "sfn_glue" {
         Effect = "Allow"
         Action = [
           "glue:StartJobRun", "glue:GetJobRun",
-          "glue:GetJobRuns", "glue:BatchStopJobRun",
-          "glue:StartCrawler", "glue:GetCrawler"
+          "glue:GetJobRuns", "glue:BatchStopJobRun"
         ]
-        Resource = "*"
+        Resource = [
+          aws_glue_job.products.arn,
+          aws_glue_job.orders.arn,
+          aws_glue_job.order_items.arn
+        ]
       },
       {
-        Sid    = "AthenaAccess"
+        Sid    = "ManageCrawlers"
+        Effect = "Allow"
+        Action = ["glue:StartCrawler", "glue:GetCrawler"]
+        Resource = [
+          aws_glue_crawler.products.arn,
+          aws_glue_crawler.orders.arn,
+          aws_glue_crawler.order_items.arn
+        ]
+      },
+      {
+        Sid    = "AthenaQuery"
         Effect = "Allow"
         Action = [
-          "athena:StartQueryExecution", "athena:GetQueryExecution",
-          "athena:GetQueryResults"
+          "athena:StartQueryExecution", "athena:StopQueryExecution",
+          "athena:GetQueryExecution", "athena:GetQueryResults"
         ]
-        Resource = "*"
+        Resource = ["arn:aws:athena:${local.region}:${local.account_id}:workgroup/${var.athena_workgroup_name}"]
+      },
+      {
+        # Athena resolves table metadata through the Glue Data Catalog using the
+        # CALLER's permissions (Step Functions is the caller), so the execution
+        # role — not just the Glue job role — needs read access to the catalog.
+        Sid    = "AthenaCatalogRead"
+        Effect = "Allow"
+        Action = [
+          "glue:GetDatabase", "glue:GetDatabases",
+          "glue:GetTable", "glue:GetTables",
+          "glue:GetPartition", "glue:GetPartitions"
+        ]
+        Resource = [
+          "arn:aws:glue:${local.region}:${local.account_id}:catalog",
+          "arn:aws:glue:${local.region}:${local.account_id}:database/${var.glue_database_name}",
+          "arn:aws:glue:${local.region}:${local.account_id}:table/${var.glue_database_name}/*"
+        ]
+      },
+      {
+        # Athena scans the Delta files in the processed zone under the caller's
+        # permissions, so the execution role needs read access to the data bucket.
+        Sid      = "AthenaDataRead"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject", "s3:GetObjectVersion", "s3:ListBucket", "s3:GetBucketLocation"]
+        Resource = [aws_s3_bucket.data.arn, "${aws_s3_bucket.data.arn}/*"]
       },
       {
         Sid    = "AthenaResultsS3"
@@ -397,7 +468,10 @@ resource "aws_iam_role_policy" "sfn_glue" {
         Resource = [aws_sns_topic.pipeline_alerts.arn]
       },
       {
-        Sid    = "CloudWatchLogs"
+        # Log-delivery management actions are not resource-scopable in IAM and
+        # MUST use "*". This is the documented requirement for Step Functions
+        # logging configuration, not an over-grant we can tighten.
+        Sid    = "CloudWatchLogDelivery"
         Effect = "Allow"
         Action = [
           "logs:CreateLogDelivery",
@@ -412,34 +486,6 @@ resource "aws_iam_role_policy" "sfn_glue" {
         Resource = "*"
       }
     ]
-  })
-}
-
-# -- EventBridge role (to trigger Step Functions from S3 events) --------------
-resource "aws_iam_role" "eventbridge_role" {
-  name = "${local.name_prefix}-eventbridge-role"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect    = "Allow"
-      Principal = { Service = "events.amazonaws.com" }
-      Action    = "sts:AssumeRole"
-    }]
-  })
-}
-
-resource "aws_iam_role_policy" "eventbridge_sfn" {
-  name = "${local.name_prefix}-eventbridge-sfn-policy"
-  role = aws_iam_role.eventbridge_role.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect   = "Allow"
-      Action   = ["states:StartExecution"]
-      Resource = [aws_sfn_state_machine.etl_pipeline.arn]
-    }]
   })
 }
 
@@ -610,43 +656,40 @@ resource "aws_sns_topic_subscription" "email_alert" {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# EVENTBRIDGE — S3 trigger for Step Functions
+# PIPELINE TRIGGER
+#
+# There is intentionally NO EventBridge S3 trigger. The three datasets form one
+# relational batch (order_items references products and orders), so they are
+# ingested by a SINGLE Step Functions execution started explicitly by
+# ingestion/ingest.py after all three files have landed. Per-file S3 events
+# would fire three independent executions and race the referential-integrity
+# checks — see step_functions.tf for the full rationale.
+#
+# The least-privilege permission set the ingestion principal needs
+# (states:StartExecution on this state machine + s3:PutObject on raw/) is
+# defined as aws_iam_policy.ingestion below; attach it to the developer or CI
+# principal that runs ingest.py.
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Enable EventBridge notifications on the data bucket
-resource "aws_s3_bucket_notification" "data_bucket_events" {
-  bucket      = aws_s3_bucket.data.id
-  eventbridge = true
-}
+resource "aws_iam_policy" "ingestion" {
+  name        = "${local.name_prefix}-ingestion-policy"
+  description = "Least-privilege permissions for the principal that runs ingest.py (upload raw files + start the ETL batch)."
 
-resource "aws_cloudwatch_event_rule" "s3_raw_ingest" {
-  name        = "${local.name_prefix}-raw-file-arrived"
-  description = "Fires when a CSV lands in the raw/ prefix of the data bucket"
-
-  event_pattern = jsonencode({
-    source      = ["aws.s3"]
-    detail-type = ["Object Created"]
-    detail = {
-      bucket = { name = [aws_s3_bucket.data.id] }
-      # Combining prefix + suffix in one filter object applies AND logic in
-      # EventBridge. This prevents the empty "raw/" prefix-marker object that
-      # Terraform creates (aws_s3_object.raw_prefix) from triggering spurious
-      # Step Functions executions on every terraform apply.
-      object = { key = [{ prefix = var.raw_data_prefix, suffix = ".csv" }] }
-    }
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "UploadRawFiles"
+        Effect   = "Allow"
+        Action   = ["s3:PutObject"]
+        Resource = ["${aws_s3_bucket.data.arn}/${var.raw_data_prefix}*"]
+      },
+      {
+        Sid      = "StartEtlBatch"
+        Effect   = "Allow"
+        Action   = ["states:StartExecution"]
+        Resource = [aws_sfn_state_machine.etl_pipeline.arn]
+      }
+    ]
   })
-}
-
-resource "aws_cloudwatch_event_target" "trigger_sfn" {
-  rule     = aws_cloudwatch_event_rule.s3_raw_ingest.name
-  arn      = aws_sfn_state_machine.etl_pipeline.arn
-  role_arn = aws_iam_role.eventbridge_role.arn
-
-  input_transformer {
-    input_paths = {
-      bucket = "$.detail.bucket.name"
-      key    = "$.detail.object.key"
-    }
-    input_template = "{\"bucket\": \"<bucket>\", \"key\": \"<key>\"}"
-  }
 }

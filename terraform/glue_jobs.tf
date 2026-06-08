@@ -80,12 +80,18 @@ locals {
     "--spark-event-logs-path"            = "s3://${aws_s3_bucket.logs.id}/spark-ui-logs/"
     "--enable-job-insights"              = "true"
     "--enable-glue-datacatalog"          = "true"
-    # --datalake-formats delta instructs Glue 4.0 to automatically activate the
-    # Delta Lake connector, register DeltaSparkSessionExtension, and configure
-    # the DeltaCatalog. No manual --conf entries are needed or safe here —
-    # passing a second --conf value for the same key in a Terraform map is
-    # unsupported and causes Spark to receive a malformed extension string.
+    # --datalake-formats delta puts the Delta Lake JARs on the Glue classpath,
+    # but on Glue 4.0 it does NOT register the Spark session extension by itself.
+    # Per AWS docs you must ALSO set spark.sql.extensions + the Delta catalog via
+    # --conf. Without it spark.sql.extensions is empty at runtime and every Delta
+    # operation (and the build_spark_session guard) fails with
+    # "Delta Lake extensions not loaded".
     "--datalake-formats" = "delta"
+    # Multiple Spark confs are chained inside a SINGLE --conf map key by repeating
+    # " --conf " between them. A Terraform map cannot hold two keys both named
+    # "--conf"; this single-key chaining is the AWS-documented pattern and Glue
+    # forwards each token to spark-submit as a separate --conf flag.
+    "--conf" = "spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog --conf spark.delta.logStore.class=org.apache.spark.sql.delta.storage.S3SingleDriverLogStore"
     # Spark staging area for shuffle spill and Delta merge commit staging.
     # Must point to a bucket where the Glue role has full read/write/delete.
     # The data bucket satisfies this — scripts and logs buckets do not.

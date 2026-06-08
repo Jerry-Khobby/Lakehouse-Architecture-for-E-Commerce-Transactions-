@@ -104,7 +104,9 @@ jobs:
           SCRIPTS_BUCKET: ${{ secrets.SCRIPTS_BUCKET }}
           AWS_REGION: ${{ secrets.AWS_REGION }}
         run: |
-          SFN_NAME="ecom-lakehouse-dev-etl-pipeline"
+          # Override per environment with a repository variable (Settings →
+          # Secrets and variables → Actions → Variables); falls back to the dev name.
+          SFN_NAME="${{ vars.SFN_STATE_MACHINE_NAME || 'ecom-lakehouse-dev-etl-pipeline' }}"
           SFN_ARN=$(aws stepfunctions list-state-machines \
             --query "stateMachines[?name=='$SFN_NAME'].stateMachineArn" \
             --output text 2>/dev/null || echo "")

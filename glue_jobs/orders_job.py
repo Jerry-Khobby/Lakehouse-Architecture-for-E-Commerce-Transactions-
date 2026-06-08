@@ -189,7 +189,7 @@ def validate(df: DataFrame, args: dict, job_run_id: str) -> DataFrame:
     # Soft flag: unusually large amounts (> 1M) — written separately, not rejected
     large_amt = valid_df.filter(F.col("total_amount") > SOFT_FLAG_AMOUNT)
     if large_amt.count() > 0:
-        flagged_path = f"s3://{args['DATA_BUCKET']}/" f"{args['FLAGGED_PREFIX'].rstrip('/')}/orders/{job_run_id}/"
+        flagged_path = f"s3://{args['DATA_BUCKET']}/{args['FLAGGED_PREFIX'].rstrip('/')}/orders/{job_run_id}/"
         large_amt.withColumn("flag_reason", F.lit("large_amount")).write.mode("append").parquet(flagged_path)
         logger.warning(
             "Soft-flagged %d orders with total_amount > %s | path=%s",
@@ -220,32 +220,30 @@ def validate(df: DataFrame, args: dict, job_run_id: str) -> DataFrame:
         write_rejected(future_ts, args, job_run_id, "future_timestamp")
 
     # ── Check 8: date derivation and consistency ──────────────────────────
-    # Derive date from timestamp where null
-    valid_df = valid_df.withColumn(
-        "date_derived",
-        F.to_date(F.col("order_timestamp")),
-    )
+    # Derive the date from the (already validated) order_timestamp, then take
+    # the provided date when present.
+    valid_df = valid_df.withColumn("date_derived", F.to_date(F.col("order_timestamp")))
     valid_df = valid_df.withColumn(
         "_date_cast",
-        F.when(
-            F.col("date").isNull(),
-            F.col("date_derived"),
-        ).otherwise(
-            F.to_date(F.col("date"), "yyyy-MM-dd"),
-        ),
+        F.when(F.col("date").isNull(), F.col("date_derived")).otherwise(F.to_date(F.col("date"), "yyyy-MM-dd")),
     )
 
-    # Flag rows where provided date doesn't match timestamp-derived date
-    date_mismatch = valid_df.filter(F.col("date").isNotNull() & (F.col("_date_cast") != F.col("date_derived")))
-    valid_df = valid_df.filter(F.col("date").isNull() | (F.col("_date_cast") == F.col("date_derived")))
+    # Reject rows whose provided date is present but unparseable. Without this
+    # branch the failed cast yields null, which makes BOTH the mismatch and the
+    # keep filters below evaluate to null (never true) — so the row would be
+    # neither rejected nor kept, i.e. silently dropped.
+    bad_date = valid_df.filter(F.col("date").isNotNull() & F.col("_date_cast").isNull())
+    if bad_date.count() > 0:
+        write_rejected(bad_date.drop("date_derived", "_date_cast"), args, job_run_id, "invalid_date_format")
+    valid_df = valid_df.filter(F.col("date").isNull() | F.col("_date_cast").isNotNull())
 
+    # Reject rows where a parseable provided date disagrees with the timestamp.
+    # After the bad_date filter both columns are non-null, so plain (in)equality
+    # is unambiguous here.
+    date_mismatch = valid_df.filter(F.col("_date_cast") != F.col("date_derived"))
     if date_mismatch.count() > 0:
-        write_rejected(
-            date_mismatch.drop("date_derived", "_date_cast"),
-            args,
-            job_run_id,
-            "date_timestamp_mismatch",
-        )
+        write_rejected(date_mismatch.drop("date_derived", "_date_cast"), args, job_run_id, "date_timestamp_mismatch")
+    valid_df = valid_df.filter(F.col("_date_cast") == F.col("date_derived"))
 
     valid_df = valid_df.drop("date", "date_derived").withColumnRenamed("_date_cast", "date")
 
@@ -368,7 +366,7 @@ def main():
                 partition_cols=args["PARTITION_COLS_LIST"],
             )
 
-        monitor.logSummary()
+        monitor.log_summary()
 
     except Exception as exc:
         logger.exception(

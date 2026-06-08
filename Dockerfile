@@ -1,24 +1,19 @@
-FROM apache/spark:3.5.0-python3
+# Local test runner — kept in lockstep with .github/workflows/ci.yml so that
+# "green locally" means "green in CI".
+#   Python 3.10  +  Java 11 (temurin via bullseye)  +  pyspark 3.3.2
+# matches AWS Glue 4.0's Spark 3.3.x runtime. delta-spark is NOT installed:
+# unit tests mock DeltaTable, so no Delta JAR is needed (see requirements-dev.txt).
+FROM python:3.10-slim-bullseye
 
-USER root
+# procps provides `ps`, which Spark's launch scripts call; the JRE runs the JVM.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends openjdk-11-jre-headless procps && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Install test tooling only.
-# pyspark is NOT pip-installed — it ships with the base image at $SPARK_HOME/python,
-# which avoids downloading the ~300 MB wheel on every build.
-RUN ln -sf /usr/bin/python3 /usr/bin/python && \
-    pip install --no-cache-dir \
-    boto3 \
-    pytest==8.3.5 \
-    pytest-cov==5.0.0 \
-    black==24.8.0 \
-    flake8==7.1.1
+# Install pinned dev/test deps first so the layer caches across source changes.
+COPY requirements-dev.txt .
+RUN pip install --no-cache-dir -r requirements-dev.txt
 
 COPY . .
-
-# Expose the bundled pyspark + py4j from the Spark installation so that
-# a plain `python` process (not spark-submit) can import pyspark normally.
-# py4j-0.10.9.7 is the version shipped with Spark 3.5.0.
-ENV PYSPARK_PYTHON=python3
-ENV PYTHONPATH="${SPARK_HOME}/python:${SPARK_HOME}/python/lib/py4j-0.10.9.7-src.zip:${PYTHONPATH}"

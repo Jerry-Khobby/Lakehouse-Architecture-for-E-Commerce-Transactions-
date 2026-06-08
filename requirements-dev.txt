@@ -4,6 +4,7 @@
 # Only install delta-spark for integration tests that write real Delta tables locally.
 pyspark==3.3.2
 boto3
+openpyxl==3.1.5  # ingest.py reads the .xlsx source files; needed to import it under test
 pytest==8.3.5
 pytest-cov==6.0.0
 black==24.8.0

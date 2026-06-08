@@ -183,3 +183,18 @@ def test_date_timestamp_mismatch_is_rejected(spark, fake_args):
         result = validate(df, fake_args, "run-012")
     assert result.count() == 1
     assert result.collect()[0]["order_id"] == "ORD-002"
+
+
+def test_invalid_date_format_is_rejected(spark, fake_args):
+    # A non-null but unparseable date must be rejected, not silently dropped.
+    df = _df(
+        spark,
+        [
+            (1, "ORD-001", "USER-1", "2025-04-01T10:00:00", "99.99", "01-04-2025"),  # wrong format
+            (2, "ORD-002", "USER-2", "2025-04-01T10:00:00", "50.00", "2025-04-01"),
+        ],
+    )
+    with patch(_PATCH, return_value=0):
+        result = validate(df, fake_args, "run-013")
+    assert result.count() == 1
+    assert result.collect()[0]["order_id"] == "ORD-002"

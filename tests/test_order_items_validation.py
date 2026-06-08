@@ -9,6 +9,8 @@ because DeltaTable.isDeltaTable is mocked to return False in conftest.py.
 
 from unittest.mock import patch
 
+import pytest
+
 from glue_jobs.order_items_job import READ_SCHEMA, validate
 
 _PATCH = "glue_jobs.order_items_job.write_rejected"
@@ -129,13 +131,41 @@ def test_invalid_timestamp_format_is_rejected(spark, fake_args):
     assert result.count() == 1
 
 
-def test_referential_check_skipped_when_delta_tables_absent(spark, fake_args):
-    # DeltaTable.isDeltaTable → False (conftest mock).
-    # All rows pass through the ref integrity steps unchanged.
+def test_referential_check_skipped_in_non_strict_mode(spark, fake_args):
+    # DeltaTable.isDeltaTable → False (conftest mock) and fake_args sets
+    # STRICT_REFERENTIAL_INTEGRITY=false, so the integrity steps are skipped and
+    # all rows pass through unchanged.
     df = _df(spark, [_row("1", "ORD-001"), _row("2", "ORD-002")])
     with patch(_PATCH, return_value=0):
         result = validate(df, fake_args, "run-009", spark)
     assert result.count() == 2
+
+
+def test_referential_check_raises_when_strict_and_upstream_missing(spark, fake_args):
+    # In production (strict mode) a missing upstream Delta table means the
+    # products/orders job failed, so order_items must abort rather than admit
+    # orphan rows. DeltaTable.isDeltaTable → False (conftest mock) triggers it.
+    strict_args = dict(fake_args)
+    strict_args["STRICT_REFERENTIAL_INTEGRITY"] = "true"
+    df = _df(spark, [_row("1", "ORD-001")])
+    with patch(_PATCH, return_value=0):
+        with pytest.raises(RuntimeError, match="referential integrity"):
+            validate(df, strict_args, "run-018", spark)
+
+
+def test_invalid_date_format_is_rejected(spark, fake_args):
+    # A non-null but unparseable date must be rejected, not silently dropped.
+    df = _df(
+        spark,
+        [
+            _row("1", "ORD-001", date="01-04-2025"),  # wrong format → unparseable
+            _row("2", "ORD-002", date="2025-04-01"),
+        ],
+    )
+    with patch(_PATCH, return_value=0):
+        result = validate(df, fake_args, "run-019", spark)
+    assert result.count() == 1
+    assert result.collect()[0]["order_id"] == "ORD-002"
 
 
 def test_null_user_id_is_rejected(spark, fake_args):

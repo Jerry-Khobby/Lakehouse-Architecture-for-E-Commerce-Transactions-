@@ -58,10 +58,15 @@ def build_spark_session(job_name: str) -> tuple:
     glue_ctx = GlueContext(sc)
     spark = glue_ctx.spark_session
 
+    # Pin the session timezone so timestamp casts and the future-timestamp
+    # cutoff comparisons in the jobs are unambiguous regardless of the worker's
+    # local zone.
+    spark.conf.set("spark.sql.session.timeZone", "UTC")
+
     active_extensions = spark.conf.get("spark.sql.extensions", "")
     if "DeltaSparkSessionExtension" not in active_extensions:
         raise RuntimeError(
-            "Delta Lake extensions not loaded. " "Check --conf spark.sql.extensions in Glue job default_arguments."
+            "Delta Lake extensions not loaded. Check --conf spark.sql.extensions in Glue job default_arguments."
         )
 
     job = Job(glue_ctx)
@@ -81,7 +86,7 @@ REQUIRED_ARGS = [
     "ENVIRONMENT",
     "DATABASE_NAME",
     "DATASET",
-    "RAW_KEY",  # exact S3 key of the file that triggered EventBridge
+    "RAW_KEY",  # exact S3 key for this dataset, from the Step Functions batch input $.files.<dataset>
     "RAW_PREFIX",
     "PROCESSED_PREFIX",
     "ARCHIVED_PREFIX",
@@ -190,7 +195,7 @@ def archive_source_file(args: dict) -> None:
 
     filename = source_key.split("/")[-1]
     run_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    dest_key = f"{args['ARCHIVED_PREFIX'].rstrip('/')}/{args['DATASET']}/" f"{run_date}/{filename}"
+    dest_key = f"{args['ARCHIVED_PREFIX'].rstrip('/')}/{args['DATASET']}/{run_date}/{filename}"
 
     try:
         s3.copy_object(

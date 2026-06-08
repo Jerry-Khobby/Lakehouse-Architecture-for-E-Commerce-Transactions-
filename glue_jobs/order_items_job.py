@@ -177,6 +177,37 @@ def _cast_numeric_fields(df: DataFrame, args: dict, job_run_id: str) -> DataFram
     return df
 
 
+def _strict_referential_integrity(args: dict) -> bool:
+    """Referential integrity is enforced strictly by default. The linear
+    pipeline runs products → orders → order_items in one execution, so by the
+    time order_items runs both parent Delta tables MUST exist; a missing table
+    signals an upstream failure, not a tolerated race.
+
+    Unit tests set STRICT_REFERENTIAL_INTEGRITY='false' to exercise validate()
+    without provisioning live Delta tables (referential integrity against real
+    tables is covered by integration tests)."""
+    return str(args.get("STRICT_REFERENTIAL_INTEGRITY", "true")).lower() != "false"
+
+
+def _require_upstream_table(spark: SparkSession, table_path: str, dataset: str, args: dict) -> bool:
+    """Return True if the upstream Delta table exists. Raise in strict mode when
+    it is missing (production default); downgrade to a skip otherwise."""
+    if DeltaTable.isDeltaTable(spark, table_path):
+        return True
+    if _strict_referential_integrity(args):
+        raise RuntimeError(
+            f"Upstream {dataset} Delta table not found at {table_path}; order_items cannot enforce "
+            f"referential integrity — the {dataset} job likely failed. Aborting to avoid admitting "
+            "orphan order_items."
+        )
+    logger.warning(
+        "%s Delta table not found at %s — skipping referential check (non-strict mode).",
+        dataset,
+        table_path,
+    )
+    return False
+
+
 def _filter_by_product_ref(
     valid_df: DataFrame,
     spark: SparkSession,
@@ -185,11 +216,7 @@ def _filter_by_product_ref(
 ) -> DataFrame:
     """Reject rows whose product_id does not exist in the products Delta table."""
     products_path = s3_path(args["DATA_BUCKET"], args["PROCESSED_PREFIX"], "products")
-    if not DeltaTable.isDeltaTable(spark, products_path):
-        logger.warning(
-            "Products Delta table not found at %s — skipping product_id referential check.",
-            products_path,
-        )
+    if not _require_upstream_table(spark, products_path, "products", args):
         return valid_df
 
     known = spark.read.format("delta").load(products_path).select(F.col("product_id").alias("_known_pid")).distinct()
@@ -207,11 +234,7 @@ def _filter_by_order_ref(
 ) -> DataFrame:
     """Reject rows whose order_id does not exist in the orders Delta table."""
     orders_path = s3_path(args["DATA_BUCKET"], args["PROCESSED_PREFIX"], "orders")
-    if not DeltaTable.isDeltaTable(spark, orders_path):
-        logger.warning(
-            "Orders Delta table not found at %s — skipping order_id referential check.",
-            orders_path,
-        )
+    if not _require_upstream_table(spark, orders_path, "orders", args):
         return valid_df
 
     known = spark.read.format("delta").load(orders_path).select(F.col("order_id").alias("_known_oid")).distinct()
@@ -333,15 +356,21 @@ def validate(df: DataFrame, args: dict, job_run_id: str, spark: SparkSession) ->
         "_date_cast",
         F.when(F.col("date").isNull(), F.col("_date_derived")).otherwise(F.to_date(F.col("date"), "yyyy-MM-dd")),
     )
-    date_mismatch = valid_df.filter(F.col("date").isNotNull() & (F.col("_date_cast") != F.col("_date_derived")))
-    valid_df = valid_df.filter(F.col("date").isNull() | (F.col("_date_cast") == F.col("_date_derived")))
+
+    # Reject rows whose provided date is present but unparseable. Without this
+    # the failed cast yields null, which makes BOTH the mismatch and the keep
+    # filters below null (never true) and the row would be silently dropped.
+    bad_date = valid_df.filter(F.col("date").isNotNull() & F.col("_date_cast").isNull())
+    if bad_date.count() > 0:
+        write_rejected(bad_date.drop("_date_derived", "_date_cast"), args, job_run_id, "invalid_date_format")
+    valid_df = valid_df.filter(F.col("date").isNull() | F.col("_date_cast").isNotNull())
+
+    # Reject rows where a parseable provided date disagrees with the timestamp.
+    date_mismatch = valid_df.filter(F.col("_date_cast") != F.col("_date_derived"))
     if date_mismatch.count() > 0:
-        write_rejected(
-            date_mismatch.drop("_date_derived", "_date_cast"),
-            args,
-            job_run_id,
-            "date_timestamp_mismatch",
-        )
+        write_rejected(date_mismatch.drop("_date_derived", "_date_cast"), args, job_run_id, "date_timestamp_mismatch")
+    valid_df = valid_df.filter(F.col("_date_cast") == F.col("_date_derived"))
+
     valid_df = valid_df.drop("date", "_date_derived").withColumnRenamed("_date_cast", "date")
 
     valid_df = _filter_by_product_ref(valid_df, spark, args, job_run_id)
@@ -464,7 +493,7 @@ def main():
                 partition_cols=args["PARTITION_COLS_LIST"],
             )
 
-        monitor.logSummary()
+        monitor.log_summary()
 
     except Exception as exc:
         logger.exception(

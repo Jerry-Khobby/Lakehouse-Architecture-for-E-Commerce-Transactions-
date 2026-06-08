@@ -91,9 +91,9 @@ variable "glue_num_workers" {
 }
 
 variable "glue_max_retries" {
-  description = "Max automatic retries for a failed Glue job run"
+  description = "Max automatic retries for a failed Glue job run (0 = Step Functions owns all retry logic)"
   type        = number
-  default     = 1
+  default     = 0
 }
 
 variable "glue_timeout_minutes" {
@@ -137,9 +137,9 @@ variable "sfn_timeout_seconds" {
 
 # ── Notifications ─────────────────────────────────────────────────────────────
 variable "alert_email" {
-  description = "Email address for pipeline alerts"
+  description = "Email address for pipeline alerts (empty = no email subscription created)"
   type        = string
-  default     = "jeremiah.coblah@amalitechtraining.org"
+  default     = ""
 }
 
 variable "slack_webhook_url" {

@@ -1,10 +1,21 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# LAMBDA — Slack notification forwarder
+# LAMBDA — Slack notification forwarder (OPTIONAL)
 # SNS publishes to the pipeline_alerts topic; this Lambda receives the message
 # and POSTs it to the Slack incoming-webhook URL.
+#
+# The entire Slack stack is gated on var.slack_webhook_url being set. Without
+# the gate the Lambda is created with an empty SLACK_WEBHOOK_URL and every
+# pipeline alert invokes a function that throws on urllib.urlopen("") — burning
+# invocations and littering CloudWatch with errors for a feature nobody enabled.
+# This mirrors the count guard already used on the email subscription in main.tf.
 # ─────────────────────────────────────────────────────────────────────────────
 
+locals {
+  slack_enabled = var.slack_webhook_url != "" ? 1 : 0
+}
+
 data "archive_file" "slack_notifier" {
+  count       = local.slack_enabled
   type        = "zip"
   output_path = "${path.module}/../slack_notifier.zip"
 
@@ -50,7 +61,8 @@ PYTHON
 
 # -- IAM role for the Lambda ---------------------------------------------------
 resource "aws_iam_role" "lambda_slack_role" {
-  name = "${local.name_prefix}-lambda-slack-role"
+  count = local.slack_enabled
+  name  = "${local.name_prefix}-lambda-slack-role"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -63,16 +75,18 @@ resource "aws_iam_role" "lambda_slack_role" {
 }
 
 resource "aws_iam_role_policy_attachment" "lambda_basic_execution" {
-  role       = aws_iam_role.lambda_slack_role.name
+  count      = local.slack_enabled
+  role       = aws_iam_role.lambda_slack_role[0].name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
 # -- Lambda function -----------------------------------------------------------
 resource "aws_lambda_function" "slack_notifier" {
+  count            = local.slack_enabled
   function_name    = "${local.name_prefix}-slack-notifier"
-  role             = aws_iam_role.lambda_slack_role.arn
-  filename         = data.archive_file.slack_notifier.output_path
-  source_code_hash = data.archive_file.slack_notifier.output_base64sha256
+  role             = aws_iam_role.lambda_slack_role[0].arn
+  filename         = data.archive_file.slack_notifier[0].output_path
+  source_code_hash = data.archive_file.slack_notifier[0].output_base64sha256
   handler          = "slack_notifier.handler"
   runtime          = "python3.12"
   timeout          = 10
@@ -85,22 +99,25 @@ resource "aws_lambda_function" "slack_notifier" {
 }
 
 resource "aws_cloudwatch_log_group" "slack_notifier" {
-  name              = "/aws/lambda/${aws_lambda_function.slack_notifier.function_name}"
+  count             = local.slack_enabled
+  name              = "/aws/lambda/${aws_lambda_function.slack_notifier[0].function_name}"
   retention_in_days = 14
 }
 
 # -- Allow SNS to invoke the Lambda --------------------------------------------
 resource "aws_lambda_permission" "sns_invoke_slack" {
+  count         = local.slack_enabled
   statement_id  = "AllowSNSInvoke"
   action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.slack_notifier.function_name
+  function_name = aws_lambda_function.slack_notifier[0].function_name
   principal     = "sns.amazonaws.com"
   source_arn    = aws_sns_topic.pipeline_alerts.arn
 }
 
 # -- Subscribe the Lambda to the SNS topic ------------------------------------
 resource "aws_sns_topic_subscription" "slack_lambda" {
+  count     = local.slack_enabled
   topic_arn = aws_sns_topic.pipeline_alerts.arn
   protocol  = "lambda"
-  endpoint  = aws_lambda_function.slack_notifier.arn
+  endpoint  = aws_lambda_function.slack_notifier[0].arn
 }

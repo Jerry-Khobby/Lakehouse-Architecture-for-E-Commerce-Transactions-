@@ -75,4 +75,8 @@ def fake_args():
         "PARTITION_COLS": "department",
         "PARTITION_COLS_LIST": ["department"],
         "SNS_TOPIC_ARN": "arn:aws:sns:us-east-1:000000000000:test-topic",
+        # Unit tests validate logic without provisioning live Delta tables, so
+        # referential-integrity checks run in non-strict mode (skip when the
+        # upstream table is absent). Production defaults to strict (raise).
+        "STRICT_REFERENTIAL_INTEGRITY": "false",
     }
