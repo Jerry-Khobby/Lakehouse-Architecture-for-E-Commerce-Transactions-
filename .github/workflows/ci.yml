@@ -9,7 +9,7 @@ on:
 jobs:
   # ── Job 1: Lint ──────────────────────────────────────────────────────────────
   lint:
-    name: Lint (ruff)
+    name: Lint (black + flake8)
     runs-on: ubuntu-latest
 
     steps:
