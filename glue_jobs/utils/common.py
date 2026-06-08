@@ -276,11 +276,13 @@ def ensure_delta_table(
     # column definitions. Delta already persisted the schema and partition spec
     # to _delta_log/ in the write above — the CREATE TABLE just registers the
     # existing table in the catalog and reads everything from the Delta log.
-    spark.sql(f"""
+    spark.sql(
+        f"""
         CREATE TABLE IF NOT EXISTS `{database_name}`.`{table_name}`
         USING DELTA
         LOCATION '{table_path}'
-    """)
+    """
+    )
 
     logger.info(
         "Delta table initialised and registered: %s.%s at %s",
