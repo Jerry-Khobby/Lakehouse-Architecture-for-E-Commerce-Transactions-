@@ -66,14 +66,14 @@ from glue_jobs.utils.notifier import SnsNotifier
 
 # Read schema: cast-sensitive columns come in as strings
 READ_SCHEMA = StructType([
-    StructField("id",                     StringType(), nullable=False),
-    StructField("order_id",               StringType(), nullable=False),
-    StructField("user_id",                StringType(), nullable=False),
-    StructField("days_since_prior_order", StringType(), nullable=True),   # optional
-    StructField("product_id",             StringType(), nullable=False),
-    StructField("add_to_cart_order",      StringType(), nullable=False),
-    StructField("reordered",              StringType(), nullable=False),
-    StructField("order_timestamp",        StringType(), nullable=False),
+    StructField("id",                     StringType(), nullable=True),
+    StructField("order_id",               StringType(), nullable=True),
+    StructField("user_id",                StringType(), nullable=True),
+    StructField("days_since_prior_order", StringType(), nullable=True),
+    StructField("product_id",             StringType(), nullable=True),
+    StructField("add_to_cart_order",      StringType(), nullable=True),
+    StructField("reordered",              StringType(), nullable=True),
+    StructField("order_timestamp",        StringType(), nullable=True),
     StructField("date",                   StringType(), nullable=True),
 ])
 

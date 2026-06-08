@@ -13,13 +13,14 @@ from pyspark.sql.types import IntegerType, StringType, StructField, StructType
 
 from glue_jobs.products_job import PRODUCTS_SCHEMA, validate
 
-# Nullable version of PRODUCTS_SCHEMA used when we need to insert NULL values
-# into the product_id column for testing the null-PK rejection rule.
+# Fully nullable schema used in null-value tests.
+# PySpark 3.5.0 raises CANNOT_BE_NONE for StringType nullable=False fields
+# when passing None at createDataFrame time, so all fields are nullable=True here.
 _NULLABLE_SCHEMA = StructType([
     StructField("product_id",    IntegerType(), nullable=True),
-    StructField("department_id", IntegerType(), nullable=False),
-    StructField("department",    StringType(),  nullable=False),
-    StructField("product_name",  StringType(),  nullable=False),
+    StructField("department_id", IntegerType(), nullable=True),
+    StructField("department",    StringType(),  nullable=True),
+    StructField("product_name",  StringType(),  nullable=True),
 ])
 
 _PATCH = "glue_jobs.products_job.write_rejected"
@@ -96,3 +97,36 @@ def test_string_fields_are_trimmed_on_output(spark, fake_args):
     row = result.collect()[0]
     assert row["department"] == "Electronics"
     assert row["product_name"] == "Laptop"
+
+
+def test_null_department_id_is_rejected(spark, fake_args):
+    df = _df(spark, [
+        (1, None, "Electronics", "Laptop"),
+        (2, 20,   "Books",       "Guide"),
+    ], schema=_NULLABLE_SCHEMA)
+    with patch(_PATCH, return_value=0):
+        result = validate(df, fake_args, "run-007")
+    assert result.count() == 1
+    assert result.collect()[0]["product_id"] == 2
+
+
+def test_null_department_is_rejected(spark, fake_args):
+    df = _df(spark, [
+        (1, 10, None,          "Laptop"),
+        (2, 20, "Electronics", "Guide"),
+    ], schema=_NULLABLE_SCHEMA)
+    with patch(_PATCH, return_value=0):
+        result = validate(df, fake_args, "run-008")
+    assert result.count() == 1
+    assert result.collect()[0]["product_id"] == 2
+
+
+def test_null_product_name_is_rejected(spark, fake_args):
+    df = _df(spark, [
+        (1, 10, "Electronics", None),
+        (2, 20, "Books",       "Guide"),
+    ], schema=_NULLABLE_SCHEMA)
+    with patch(_PATCH, return_value=0):
+        result = validate(df, fake_args, "run-009")
+    assert result.count() == 1
+    assert result.collect()[0]["product_id"] == 2

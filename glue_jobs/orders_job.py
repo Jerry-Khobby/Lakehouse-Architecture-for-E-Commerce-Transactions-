@@ -57,12 +57,12 @@ from glue_jobs.utils.notifier import SnsNotifier
 # Read schema: order_timestamp and date come in as strings so we control
 # the cast and can catch bad formats explicitly.
 READ_SCHEMA = StructType([
-    StructField("order_num",       LongType(),   nullable=True),   # surrogate row num
-    StructField("order_id",        StringType(), nullable=False),
-    StructField("user_id",         StringType(), nullable=False),
-    StructField("order_timestamp", StringType(), nullable=False),  # cast in validation
-    StructField("total_amount",    StringType(), nullable=False),  # cast in validation
-    StructField("date",            StringType(), nullable=True),   # derived if null
+    StructField("order_num",       LongType(),   nullable=True),
+    StructField("order_id",        StringType(), nullable=True),
+    StructField("user_id",         StringType(), nullable=True),
+    StructField("order_timestamp", StringType(), nullable=True),
+    StructField("total_amount",    StringType(), nullable=True),
+    StructField("date",            StringType(), nullable=True),
 ])
 
 # Storage schema: final typed columns written to Delta

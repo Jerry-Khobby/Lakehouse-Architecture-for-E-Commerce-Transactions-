@@ -112,3 +112,93 @@ def test_referential_check_skipped_when_delta_tables_absent(spark, fake_args):
     with patch(_PATCH, return_value=0):
         result = validate(df, fake_args, "run-009", spark)
     assert result.count() == 2
+
+
+def test_null_user_id_is_rejected(spark, fake_args):
+    df = _df(spark, [
+        _row("1", "ORD-001", user_id=None),
+        _row("2", "ORD-002"),
+    ])
+    with patch(_PATCH, return_value=0):
+        result = validate(df, fake_args, "run-010", spark)
+    assert result.count() == 1
+    assert result.collect()[0]["order_id"] == "ORD-002"
+
+
+def test_null_required_field_product_id_is_rejected(spark, fake_args):
+    df = _df(spark, [
+        _row("1", "ORD-001", product_id=None),
+        _row("2", "ORD-002"),
+    ])
+    with patch(_PATCH, return_value=0):
+        result = validate(df, fake_args, "run-011", spark)
+    assert result.count() == 1
+    assert result.collect()[0]["order_id"] == "ORD-002"
+
+
+def test_null_required_field_order_timestamp_is_rejected(spark, fake_args):
+    df = _df(spark, [
+        _row("1", "ORD-001", ts=None),
+        _row("2", "ORD-002"),
+    ])
+    with patch(_PATCH, return_value=0):
+        result = validate(df, fake_args, "run-012", spark)
+    assert result.count() == 1
+    assert result.collect()[0]["order_id"] == "ORD-002"
+
+
+def test_invalid_id_format_is_rejected(spark, fake_args):
+    df = _df(spark, [
+        _row(item_id="not-a-number", order_id="ORD-001"),
+        _row(item_id="2",            order_id="ORD-002"),
+    ])
+    with patch(_PATCH, return_value=0):
+        result = validate(df, fake_args, "run-013", spark)
+    assert result.count() == 1
+    assert result.collect()[0]["order_id"] == "ORD-002"
+
+
+def test_invalid_product_id_value_is_rejected(spark, fake_args):
+    df = _df(spark, [
+        _row("1", "ORD-001", product_id="0"),
+        _row("2", "ORD-002", product_id="5"),
+    ])
+    with patch(_PATCH, return_value=0):
+        result = validate(df, fake_args, "run-014", spark)
+    assert result.count() == 1
+    assert result.collect()[0]["order_id"] == "ORD-002"
+
+
+def test_future_timestamp_is_rejected(spark, fake_args):
+    from datetime import datetime, timedelta, timezone
+    future = (datetime.now(timezone.utc) + timedelta(hours=5)).strftime("%Y-%m-%dT%H:%M:%S")
+    df = _df(spark, [
+        _row("1", "ORD-001", ts=future),
+        _row("2", "ORD-002", ts="2025-04-01T10:00:00"),
+    ])
+    with patch(_PATCH, return_value=0):
+        result = validate(df, fake_args, "run-015", spark)
+    assert result.count() == 1
+    assert result.collect()[0]["order_id"] == "ORD-002"
+
+
+def test_date_timestamp_mismatch_is_rejected(spark, fake_args):
+    df = _df(spark, [
+        _row("1", "ORD-001", ts="2025-04-01T10:00:00", date="2025-04-02"),
+        _row("2", "ORD-002", ts="2025-04-01T10:00:00", date="2025-04-01"),
+    ])
+    with patch(_PATCH, return_value=0):
+        result = validate(df, fake_args, "run-016", spark)
+    assert result.count() == 1
+    assert result.collect()[0]["order_id"] == "ORD-002"
+
+
+def test_intra_batch_dedup_on_composite_key_keeps_latest(spark, fake_args):
+    df = _df(spark, [
+        _row("1", "ORD-001", ts="2025-04-01T10:00:00"),
+        _row("1", "ORD-001", ts="2025-04-01T12:00:00"),
+        _row("2", "ORD-002"),
+    ])
+    with patch(_PATCH, return_value=0):
+        result = validate(df, fake_args, "run-017", spark)
+    assert result.count() == 2

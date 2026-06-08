@@ -1,13 +1,25 @@
 """
 Unit tests for shared utilities in glue_jobs.utils.common.
-
-These are pure-Python functions with no Spark or AWS dependencies
-so they run quickly and need no fixtures.
 """
 
 import logging
+from unittest.mock import MagicMock, patch
 
-from glue_jobs.utils.common import log_counts, s3_path
+import pytest
+from botocore.exceptions import ClientError
+from pyspark.sql.types import StringType, StructField, StructType
+
+from glue_jobs.utils.common import (
+    _get_region,
+    archive_source_file,
+    build_spark_session,
+    ensure_delta_table,
+    log_counts,
+    parse_args,
+    s3_path,
+    update_catalog_table,
+    write_rejected,
+)
 
 
 class TestS3Path:
@@ -48,3 +60,236 @@ class TestLogCounts:
         with caplog.at_level(logging.INFO, logger="lakehouse.common"):
             log_counts("order_items:validate", 50, 50, 0)
         assert "pass_rate=100.0%" in caplog.text
+
+
+class TestWriteRejected:
+    _SIMPLE_SCHEMA = StructType([StructField("id", StringType(), True)])
+
+    def test_returns_zero_for_empty_df(self, spark, fake_args):
+        empty = spark.createDataFrame([], self._SIMPLE_SCHEMA)
+        assert write_rejected(empty, fake_args, "run-001", "test_reason") == 0
+
+    @patch("pyspark.sql.readwriter.DataFrameWriter.parquet")
+    def test_returns_row_count_for_non_empty_df(self, mock_parquet, spark, fake_args):
+        df = spark.createDataFrame([("1",), ("2",), ("3",)], self._SIMPLE_SCHEMA)
+        result = write_rejected(df, fake_args, "run-002", "null_pk")
+        assert result == 3
+        mock_parquet.assert_called_once()
+
+    @patch("pyspark.sql.readwriter.DataFrameWriter.parquet")
+    def test_uses_scalar_rejection_reason_when_no_reason_col(self, mock_parquet, spark, fake_args):
+        df = spark.createDataFrame([("A",)], self._SIMPLE_SCHEMA)
+        write_rejected(df, fake_args, "run-003", "my_reason")
+        mock_parquet.assert_called_once()
+
+    @patch("pyspark.sql.readwriter.DataFrameWriter.parquet")
+    def test_uses_per_row_reason_col_when_provided(self, mock_parquet, spark, fake_args):
+        schema = StructType([
+            StructField("id",     StringType(), True),
+            StructField("reason", StringType(), True),
+        ])
+        df = spark.createDataFrame([("1", "bad_value")], schema)
+        result = write_rejected(df, fake_args, "run-004", "fallback", reason_col="reason")
+        assert result == 1
+        mock_parquet.assert_called_once()
+
+
+class TestGetRegion:
+    def test_falls_back_to_us_east_1_on_network_error(self):
+        with patch("urllib.request.urlopen", side_effect=OSError("timeout")):
+            assert _get_region() == "us-east-1"
+
+    def test_falls_back_to_us_east_1_on_any_unexpected_exception(self):
+        with patch("urllib.request.urlopen", side_effect=Exception("unexpected")):
+            assert _get_region() == "us-east-1"
+
+    def test_returns_region_from_imdsv2_on_success(self):
+        token_ctx = MagicMock()
+        token_ctx.__enter__ = lambda s: s
+        token_ctx.__exit__ = MagicMock(return_value=False)
+        token_ctx.read.return_value = b"mock-token"
+
+        region_ctx = MagicMock()
+        region_ctx.__enter__ = lambda s: s
+        region_ctx.__exit__ = MagicMock(return_value=False)
+        region_ctx.read.return_value = b"eu-west-1"
+
+        with patch("urllib.request.urlopen", side_effect=[token_ctx, region_ctx]):
+            assert _get_region() == "eu-west-1"
+
+
+class TestArchiveSourceFile:
+    def _make_clients(self):
+        mock_s3  = MagicMock()
+        mock_sts = MagicMock()
+        mock_sts.get_caller_identity.return_value = {"Account": "123456789012"}
+        return mock_s3, mock_sts
+
+    def _client_factory(self, mock_s3, mock_sts):
+        return lambda svc, **kw: mock_s3 if svc == "s3" else mock_sts
+
+    def test_copies_then_deletes_source_on_success(self, fake_args):
+        mock_s3, mock_sts = self._make_clients()
+        with patch("boto3.client", side_effect=self._client_factory(mock_s3, mock_sts)):
+            archive_source_file(fake_args)
+        mock_s3.copy_object.assert_called_once()
+        mock_s3.delete_object.assert_called_once()
+
+    def test_does_not_raise_when_copy_fails(self, fake_args):
+        mock_s3, mock_sts = self._make_clients()
+        mock_s3.copy_object.side_effect = ClientError(
+            {"Error": {"Code": "NoSuchKey", "Message": "Not Found"}}, "copy_object"
+        )
+        with patch("boto3.client", side_effect=self._client_factory(mock_s3, mock_sts)):
+            archive_source_file(fake_args)
+
+
+class TestUpdateCatalogTable:
+    def _make_glue_mock(self):
+        mock_glue = MagicMock()
+        NotFoundError = type("EntityNotFoundException", (Exception,), {})
+        mock_glue.exceptions.EntityNotFoundException = NotFoundError
+        return mock_glue, NotFoundError
+
+    def test_calls_update_table_when_table_already_exists(self, fake_args):
+        from glue_jobs.orders_job import ORDERS_SCHEMA
+        mock_glue, _ = self._make_glue_mock()
+        with patch("boto3.client", return_value=mock_glue):
+            with patch("glue_jobs.utils.common._get_region", return_value="us-east-1"):
+                update_catalog_table(fake_args, "orders", "s3://b/orders/", ORDERS_SCHEMA, ["date"])
+        mock_glue.update_table.assert_called_once()
+
+    def test_falls_back_to_create_table_when_not_found(self, fake_args):
+        from glue_jobs.orders_job import ORDERS_SCHEMA
+        mock_glue, NotFoundError = self._make_glue_mock()
+        mock_glue.update_table.side_effect = NotFoundError("table not found")
+        with patch("boto3.client", return_value=mock_glue):
+            with patch("glue_jobs.utils.common._get_region", return_value="us-east-1"):
+                update_catalog_table(fake_args, "orders", "s3://b/orders/", ORDERS_SCHEMA, ["date"])
+        mock_glue.create_table.assert_called_once()
+
+    def test_does_not_raise_on_client_error(self, fake_args):
+        from glue_jobs.orders_job import ORDERS_SCHEMA
+        mock_glue, _ = self._make_glue_mock()
+        mock_glue.update_table.side_effect = ClientError(
+            {"Error": {"Code": "AccessDeniedException", "Message": "Denied"}}, "update_table"
+        )
+        with patch("boto3.client", return_value=mock_glue):
+            with patch("glue_jobs.utils.common._get_region", return_value="us-east-1"):
+                update_catalog_table(fake_args, "orders", "s3://b/orders/", ORDERS_SCHEMA, ["date"])
+
+    def test_handles_decimal_type_in_schema(self, fake_args):
+        from glue_jobs.orders_job import ORDERS_SCHEMA
+        mock_glue, _ = self._make_glue_mock()
+        with patch("boto3.client", return_value=mock_glue):
+            with patch("glue_jobs.utils.common._get_region", return_value="us-east-1"):
+                update_catalog_table(fake_args, "orders", "s3://b/orders/", ORDERS_SCHEMA, ["date"])
+        call_kwargs = mock_glue.update_table.call_args[1]
+        columns = call_kwargs["TableInput"]["StorageDescriptor"]["Columns"]
+        amount_col = next(c for c in columns if c["Name"] == "total_amount")
+        assert amount_col["Type"].startswith("decimal(")
+
+
+class TestBuildSparkSession:
+    def _make_mocks(self, extensions="io.delta.sql.DeltaSparkSessionExtension"):
+        mock_sc = MagicMock()
+        mock_spark = MagicMock()
+        mock_spark.conf.get.return_value = extensions
+        mock_glue_ctx = MagicMock()
+        mock_glue_ctx.spark_session = mock_spark
+        mock_job = MagicMock()
+        return mock_sc, mock_spark, mock_glue_ctx, mock_job
+
+    def test_raises_when_delta_extension_is_missing(self):
+        mock_sc, mock_spark, mock_glue_ctx, mock_job = self._make_mocks(extensions="")
+        with patch("glue_jobs.utils.common.SparkContext") as mock_sc_cls:
+            mock_sc_cls.getOrCreate.return_value = mock_sc
+            with patch("glue_jobs.utils.common.GlueContext", return_value=mock_glue_ctx):
+                with pytest.raises(RuntimeError, match="Delta Lake extensions not loaded"):
+                    build_spark_session("test-job")
+
+    def test_returns_four_tuple_when_delta_extension_present(self):
+        mock_sc, mock_spark, mock_glue_ctx, mock_job = self._make_mocks()
+        with patch("glue_jobs.utils.common.SparkContext") as mock_sc_cls:
+            mock_sc_cls.getOrCreate.return_value = mock_sc
+            with patch("glue_jobs.utils.common.GlueContext", return_value=mock_glue_ctx):
+                with patch("glue_jobs.utils.common.Job", return_value=mock_job):
+                    sc, glue_ctx, spark, job = build_spark_session("test-job")
+        assert sc is mock_sc
+        assert glue_ctx is mock_glue_ctx
+        assert spark is mock_spark
+        assert job is mock_job
+
+
+class TestParseArgs:
+    _VALID_RAW = {
+        "JOB_NAME":          "test-job",
+        "DATA_BUCKET":       "my-bucket",
+        "SCRIPTS_BUCKET":    "scripts-bucket",
+        "ENVIRONMENT":       "test",
+        "DATABASE_NAME":     "test_db",
+        "DATASET":           "products",
+        "RAW_KEY":           "raw/products.csv",
+        "RAW_PREFIX":        "raw/",
+        "PROCESSED_PREFIX":  "lakehouse-dwh/",
+        "ARCHIVED_PREFIX":   "archived/",
+        "REJECTED_PREFIX":   "rejected/",
+        "FLAGGED_PREFIX":    "flagged/",
+        "MERGE_KEYS":        "product_id",
+        "PARTITION_COLS":    "department",
+        "SNS_TOPIC_ARN":     "arn:aws:sns:us-east-1:000000000000:test",
+    }
+
+    def test_returns_dict_with_split_list_fields(self):
+        with patch("glue_jobs.utils.common.getResolvedOptions", return_value=dict(self._VALID_RAW)):
+            result = parse_args()
+        assert result["MERGE_KEYS_LIST"] == ["product_id"]
+        assert result["PARTITION_COLS_LIST"] == ["department"]
+
+    def test_handles_composite_merge_keys(self):
+        raw = dict(self._VALID_RAW)
+        raw["MERGE_KEYS"] = "id, order_id"
+        with patch("glue_jobs.utils.common.getResolvedOptions", return_value=raw):
+            result = parse_args()
+        assert result["MERGE_KEYS_LIST"] == ["id", "order_id"]
+
+    def test_raises_when_data_bucket_is_blank(self):
+        raw = dict(self._VALID_RAW)
+        raw["DATA_BUCKET"] = "   "
+        with patch("glue_jobs.utils.common.getResolvedOptions", return_value=raw):
+            with pytest.raises(ValueError, match="DATA_BUCKET"):
+                parse_args()
+
+    def test_raises_when_dataset_is_empty(self):
+        raw = dict(self._VALID_RAW)
+        raw["DATASET"] = ""
+        with patch("glue_jobs.utils.common.getResolvedOptions", return_value=raw):
+            with pytest.raises(ValueError, match="DATASET"):
+                parse_args()
+
+
+class TestEnsureDeltaTable:
+    def test_skips_init_when_table_already_exists(self, spark):
+        from glue_jobs.orders_job import ORDERS_SCHEMA
+        with patch("glue_jobs.utils.common.DeltaTable.isDeltaTable", return_value=True):
+            with patch.object(spark, "sql") as mock_sql:
+                ensure_delta_table(spark, "s3://b/orders/", ORDERS_SCHEMA, ["date"], "orders", "db")
+        mock_sql.assert_not_called()
+
+    def test_creates_table_when_it_does_not_exist(self, spark):
+        from glue_jobs.orders_job import ORDERS_SCHEMA
+        mock_df = MagicMock()
+        with patch("glue_jobs.utils.common.DeltaTable.isDeltaTable", return_value=False):
+            with patch.object(spark, "createDataFrame", return_value=mock_df):
+                with patch.object(spark, "sql") as mock_sql:
+                    ensure_delta_table(spark, "s3://b/orders/", ORDERS_SCHEMA, ["date"], "orders", "db")
+        mock_sql.assert_called_once()
+
+    def test_creates_table_without_partition_cols(self, spark):
+        from glue_jobs.orders_job import ORDERS_SCHEMA
+        mock_df = MagicMock()
+        with patch("glue_jobs.utils.common.DeltaTable.isDeltaTable", return_value=False):
+            with patch.object(spark, "createDataFrame", return_value=mock_df):
+                with patch.object(spark, "sql") as mock_sql:
+                    ensure_delta_table(spark, "s3://b/orders/", ORDERS_SCHEMA, [], "orders", "db")
+        mock_sql.assert_called_once()

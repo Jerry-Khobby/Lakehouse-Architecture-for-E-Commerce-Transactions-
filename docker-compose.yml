@@ -1,0 +1,26 @@
+services:
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    entrypoint:
+      - python3
+      - -m
+      - pytest
+      - tests/
+      - -v
+      - --tb=short
+      - --cov=glue_jobs
+      - --cov-report=term-missing
+      - --cov-fail-under=70
+
+  lint:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    entrypoint:
+      - ruff
+      - check
+      - glue_jobs/
+      - ingestion/
+      - tests/
