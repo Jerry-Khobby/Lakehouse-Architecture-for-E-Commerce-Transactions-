@@ -18,9 +18,5 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    entrypoint:
-      - ruff
-      - check
-      - glue_jobs/
-      - ingestion/
-      - tests/
+    entrypoint: ["/bin/sh", "-c"]
+    command: "black --check --line-length 120 glue_jobs/ ingestion/ tests/ && flake8 glue_jobs/ ingestion/ tests/"

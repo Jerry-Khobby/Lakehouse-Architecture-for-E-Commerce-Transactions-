@@ -9,8 +9,6 @@ because DeltaTable.isDeltaTable is mocked to return False in conftest.py.
 
 from unittest.mock import patch
 
-import pytest
-
 from glue_jobs.order_items_job import READ_SCHEMA, validate
 
 _PATCH = "glue_jobs.order_items_job.write_rejected"

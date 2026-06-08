@@ -9,8 +9,6 @@ the returned DataFrame has correctly typed columns (Timestamp, Decimal, Date).
 from decimal import Decimal
 from unittest.mock import patch
 
-import pytest
-
 from glue_jobs.orders_job import READ_SCHEMA, validate
 
 _PATCH = "glue_jobs.orders_job.write_rejected"
@@ -93,7 +91,7 @@ def test_intra_batch_dedup_keeps_latest_by_timestamp(spark, fake_args):
     with patch(_PATCH, return_value=0):
         result = validate(df, fake_args, "run-007")
     assert result.count() == 1
-    assert float(result.collect()[0]["total_amount"]) == 110.00
+    assert result.collect()[0]["total_amount"] == Decimal("110.00")
 
 
 def test_valid_order_has_correctly_typed_columns(spark, fake_args):

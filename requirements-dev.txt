@@ -6,4 +6,5 @@ pyspark==3.3.2
 boto3
 pytest==8.3.5
 pytest-cov==6.0.0
-ruff==0.9.6
+black==24.8.0
+flake8==7.1.1

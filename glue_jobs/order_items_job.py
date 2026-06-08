@@ -31,7 +31,6 @@ Delta path : s3://<DATA>/<PROCESSED_PREFIX>order_items/
 """
 
 import sys
-import logging
 from datetime import datetime, timezone, timedelta
 
 from pyspark.sql import DataFrame, SparkSession

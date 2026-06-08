@@ -1,0 +1,10 @@
+[flake8]
+max-line-length = 120
+extend-ignore =
+    # line too long — intentional in some Spark expressions (black handles formatting)
+    E501,
+    # module-level import not at top — conftest must mock sys.modules before any project import
+    E402,
+per-file-ignores =
+    # F811: redefinition of unused name — normal for pytest fixtures
+    tests/*:F811

@@ -12,7 +12,8 @@ RUN ln -sf /usr/bin/python3 /usr/bin/python && \
     boto3 \
     pytest==8.3.5 \
     pytest-cov==5.0.0 \
-    ruff==0.9.6
+    black==24.8.0 \
+    flake8==7.1.1
 
 COPY . .
 

@@ -8,7 +8,6 @@ DataFrame only, not on what was written to S3.
 
 from unittest.mock import patch
 
-import pytest
 from pyspark.sql.types import IntegerType, StringType, StructField, StructType
 
 from glue_jobs.products_job import PRODUCTS_SCHEMA, validate
