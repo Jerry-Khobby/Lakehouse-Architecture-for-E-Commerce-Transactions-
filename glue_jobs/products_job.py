@@ -23,8 +23,10 @@ from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql import Window
 from pyspark.sql.types import (
-    StructType, StructField,
-    IntegerType, StringType,
+    StructType,
+    StructField,
+    IntegerType,
+    StringType,
 )
 from delta.tables import DeltaTable
 
@@ -46,12 +48,14 @@ from glue_jobs.utils.monitor import PipelineMonitor
 from glue_jobs.utils.notifier import SnsNotifier
 
 # Schema
-PRODUCTS_SCHEMA = StructType([
-    StructField("product_id",    IntegerType(), nullable=False),
-    StructField("department_id", IntegerType(), nullable=False),
-    StructField("department",    StringType(),  nullable=False),
-    StructField("product_name",  StringType(),  nullable=False),
-])
+PRODUCTS_SCHEMA = StructType(
+    [
+        StructField("product_id", IntegerType(), nullable=False),
+        StructField("department_id", IntegerType(), nullable=False),
+        StructField("department", StringType(), nullable=False),
+        StructField("product_name", StringType(), nullable=False),
+    ]
+)
 
 TABLE_NAME = "products"
 
@@ -72,8 +76,7 @@ def read_source(spark, args: dict) -> DataFrame:
     logger.info("Reading products CSV from %s", source_path)
 
     df = (
-        spark.read
-        .format("csv")
+        spark.read.format("csv")
         .option("header", "true")
         .option("mode", "FAILFAST")
         .option("enforceSchema", "true")
@@ -86,8 +89,8 @@ def read_source(spark, args: dict) -> DataFrame:
     return df
 
 
-
 # Stage 2 — Validation
+
 
 def validate(df: DataFrame, args: dict, job_run_id: str) -> DataFrame:
     """
@@ -128,15 +131,11 @@ def validate(df: DataFrame, args: dict, job_run_id: str) -> DataFrame:
         valid_df = valid_df.filter(F.col(col).isNotNull())
 
     # ── Check 3: invalid ID values (must be positive integers > 0) ────────
-    invalid_ids = valid_df.filter(
-        (F.col("product_id") <= 0) | (F.col("department_id") <= 0)
-    )
+    invalid_ids = valid_df.filter((F.col("product_id") <= 0) | (F.col("department_id") <= 0))
     if invalid_ids.count() > 0:
         write_rejected(invalid_ids, args, job_run_id, "invalid_id_value")
         rejected_frames.append(invalid_ids)
-    valid_df = valid_df.filter(
-        (F.col("product_id") > 0) & (F.col("department_id") > 0)
-    )
+    valid_df = valid_df.filter((F.col("product_id") > 0) & (F.col("department_id") > 0))
 
     # ── Check 4: empty or whitespace-only string fields ───────────────────
     string_fields = ["department", "product_name"]
@@ -168,7 +167,6 @@ def validate(df: DataFrame, args: dict, job_run_id: str) -> DataFrame:
     log_counts("products:validate", total, valid_count, total_rejected)
 
     return valid_df
-
 
 
 # Stage 3 — Delta MERGE (upsert)
@@ -206,7 +204,8 @@ def merge_into_delta(spark, valid_df: DataFrame, args: dict) -> str:
 
     logger.info(
         "Merging %d valid product rows into %s",
-        valid_df.count(), table_path,
+        valid_df.count(),
+        table_path,
     )
 
     (
@@ -215,8 +214,8 @@ def merge_into_delta(spark, valid_df: DataFrame, args: dict) -> str:
             valid_df.alias("source"),
             "target.product_id = source.product_id",
         )
-        .whenMatchedUpdateAll()        # dimension update — always take latest value
-        .whenNotMatchedInsertAll()     # new product — insert it
+        .whenMatchedUpdateAll()  # dimension update — always take latest value
+        .whenNotMatchedInsertAll()  # new product — insert it
         .execute()
     )
 
@@ -228,16 +227,13 @@ def merge_into_delta(spark, valid_df: DataFrame, args: dict) -> str:
     return table_path
 
 
-
 # Main entrypoint
 def main():
-    _, _, spark, job = build_spark_session(
-        getResolvedOptions(sys.argv, ["JOB_NAME"])["JOB_NAME"]
-    )
+    _, _, spark, job = build_spark_session(getResolvedOptions(sys.argv, ["JOB_NAME"])["JOB_NAME"])
 
-    args       = parse_args()
+    args = parse_args()
     job_run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
-    monitor    = PipelineMonitor(
+    monitor = PipelineMonitor(
         args["JOB_NAME"],
         SnsNotifier(args["SNS_TOPIC_ARN"], args["ENVIRONMENT"]),
     )
@@ -273,7 +269,9 @@ def main():
     except Exception as exc:
         logger.exception(
             "products_job FAILED | raw_key=%s | run_id=%s | error=%s",
-            args.get("RAW_KEY", "unknown"), job_run_id, exc,
+            args.get("RAW_KEY", "unknown"),
+            job_run_id,
+            exc,
         )
         raise
 

@@ -10,9 +10,9 @@ SNS_SUBJECT_MAX_LENGTH = 100
 class SnsNotifier:
 
     def __init__(self, topicArn: str, environment: str):
-        self._topicArn    = topicArn
+        self._topicArn = topicArn
         self._environment = environment
-        self._client      = boto3.client("sns")
+        self._client = boto3.client("sns")
 
     def sendJobStarted(self, jobName: str, stageName: str) -> None:
         self._publish(

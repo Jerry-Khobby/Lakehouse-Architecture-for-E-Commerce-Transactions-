@@ -37,9 +37,13 @@ from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql import Window
 from pyspark.sql.types import (
-    StructType, StructField,
-    LongType, IntegerType, StringType,
-    TimestampType, DateType,
+    StructType,
+    StructField,
+    LongType,
+    IntegerType,
+    StringType,
+    TimestampType,
+    DateType,
 )
 from delta.tables import DeltaTable
 
@@ -59,43 +63,45 @@ from glue_jobs.utils.common import (
 from glue_jobs.utils.monitor import PipelineMonitor
 from glue_jobs.utils.notifier import SnsNotifier
 
-
 # Schema
 
 
 # Read schema: cast-sensitive columns come in as strings
-READ_SCHEMA = StructType([
-    StructField("id",                     StringType(), nullable=True),
-    StructField("order_id",               StringType(), nullable=True),
-    StructField("user_id",                StringType(), nullable=True),
-    StructField("days_since_prior_order", StringType(), nullable=True),
-    StructField("product_id",             StringType(), nullable=True),
-    StructField("add_to_cart_order",      StringType(), nullable=True),
-    StructField("reordered",              StringType(), nullable=True),
-    StructField("order_timestamp",        StringType(), nullable=True),
-    StructField("date",                   StringType(), nullable=True),
-])
+READ_SCHEMA = StructType(
+    [
+        StructField("id", StringType(), nullable=True),
+        StructField("order_id", StringType(), nullable=True),
+        StructField("user_id", StringType(), nullable=True),
+        StructField("days_since_prior_order", StringType(), nullable=True),
+        StructField("product_id", StringType(), nullable=True),
+        StructField("add_to_cart_order", StringType(), nullable=True),
+        StructField("reordered", StringType(), nullable=True),
+        StructField("order_timestamp", StringType(), nullable=True),
+        StructField("date", StringType(), nullable=True),
+    ]
+)
 
 # Storage schema: final typed columns written to Delta
-ORDER_ITEMS_SCHEMA = StructType([
-    StructField("id",                     LongType(),      nullable=False),
-    StructField("order_id",               StringType(),    nullable=False),
-    StructField("user_id",                StringType(),    nullable=False),
-    StructField("days_since_prior_order", IntegerType(),   nullable=True),
-    StructField("product_id",             IntegerType(),   nullable=False),
-    StructField("add_to_cart_order",      IntegerType(),   nullable=False),
-    StructField("reordered",              IntegerType(),   nullable=False),
-    StructField("order_timestamp",        TimestampType(), nullable=False),
-    StructField("date",                   DateType(),      nullable=False),
-])
+ORDER_ITEMS_SCHEMA = StructType(
+    [
+        StructField("id", LongType(), nullable=False),
+        StructField("order_id", StringType(), nullable=False),
+        StructField("user_id", StringType(), nullable=False),
+        StructField("days_since_prior_order", IntegerType(), nullable=True),
+        StructField("product_id", IntegerType(), nullable=False),
+        StructField("add_to_cart_order", IntegerType(), nullable=False),
+        StructField("reordered", IntegerType(), nullable=False),
+        StructField("order_timestamp", TimestampType(), nullable=False),
+        StructField("date", DateType(), nullable=False),
+    ]
+)
 
-TIMESTAMP_FORMAT         = "yyyy-MM-dd'T'HH:mm:ss"
-FUTURE_TOLERANCE_HOURS   = 1
-MAX_DAYS_SINCE_PRIOR     = 365
+TIMESTAMP_FORMAT = "yyyy-MM-dd'T'HH:mm:ss"
+FUTURE_TOLERANCE_HOURS = 1
+MAX_DAYS_SINCE_PRIOR = 365
 
 
 TABLE_NAME = "order_items"
-
 
 
 # Stage 1 — Read
@@ -108,8 +114,7 @@ def read_source(spark, args: dict) -> DataFrame:
     logger.info("Reading order_items CSV from %s", source_path)
 
     df = (
-        spark.read
-        .format("csv")
+        spark.read.format("csv")
         .option("header", "true")
         .option("mode", "FAILFAST")
         .option("enforceSchema", "true")
@@ -120,7 +125,6 @@ def read_source(spark, args: dict) -> DataFrame:
     count = df.count()
     logger.info("Read %d raw rows from %s", count, source_path)
     return df
-
 
 
 # Stage 2 — Validation
@@ -151,7 +155,11 @@ def _cast_numeric_fields(df: DataFrame, args: dict, job_run_id: str) -> DataFram
     bad_cart = df.filter(F.col("_cart_cast").isNull())
     if bad_cart.count() > 0:
         write_rejected(bad_cart.drop("_cart_cast"), args, job_run_id, "invalid_add_to_cart_order_format")
-    df = df.filter(F.col("_cart_cast").isNotNull()).drop("add_to_cart_order").withColumnRenamed("_cart_cast", "add_to_cart_order")
+    df = (
+        df.filter(F.col("_cart_cast").isNotNull())
+        .drop("add_to_cart_order")
+        .withColumnRenamed("_cart_cast", "add_to_cart_order")
+    )
 
     # Cast reordered → IntegerType
     df = df.withColumn("_reorder_cast", F.col("reordered").cast(IntegerType()))
@@ -184,11 +192,7 @@ def _filter_by_product_ref(
         )
         return valid_df
 
-    known = (
-        spark.read.format("delta").load(products_path)
-        .select(F.col("product_id").alias("_known_pid"))
-        .distinct()
-    )
+    known = spark.read.format("delta").load(products_path).select(F.col("product_id").alias("_known_pid")).distinct()
     unknown = valid_df.join(known, valid_df["product_id"] == known["_known_pid"], how="left_anti")
     if unknown.count() > 0:
         write_rejected(unknown, args, job_run_id, "unknown_product_id")
@@ -210,11 +214,7 @@ def _filter_by_order_ref(
         )
         return valid_df
 
-    known = (
-        spark.read.format("delta").load(orders_path)
-        .select(F.col("order_id").alias("_known_oid"))
-        .distinct()
-    )
+    known = spark.read.format("delta").load(orders_path).select(F.col("order_id").alias("_known_oid")).distinct()
     unknown = valid_df.join(known, valid_df["order_id"] == known["_known_oid"], how="left_anti")
     if unknown.count() > 0:
         write_rejected(unknown, args, job_run_id, "unknown_order_id")
@@ -243,24 +243,28 @@ def validate(df: DataFrame, args: dict, job_run_id: str, spark: SparkSession) ->
 
     Returns a fully-typed valid DataFrame matching ORDER_ITEMS_SCHEMA.
     """
-    total   = df.count()
+    total = df.count()
     now_utc = datetime.now(timezone.utc)
 
     # ── Check 1: null composite key ───────────────────────────────────────
     null_key = df.filter(
-        F.col("id").isNull() | (F.trim(F.col("id")) == "") |
-        F.col("order_id").isNull() | (F.trim(F.col("order_id")) == "")
+        F.col("id").isNull()
+        | (F.trim(F.col("id")) == "")
+        | F.col("order_id").isNull()
+        | (F.trim(F.col("order_id")) == "")
     )
     valid_df = df.filter(
-        F.col("id").isNotNull() & (F.trim(F.col("id")) != "") &
-        F.col("order_id").isNotNull() & (F.trim(F.col("order_id")) != "")
+        F.col("id").isNotNull()
+        & (F.trim(F.col("id")) != "")
+        & F.col("order_id").isNotNull()
+        & (F.trim(F.col("order_id")) != "")
     )
     if null_key.count() > 0:
         write_rejected(null_key, args, job_run_id, "null_composite_key")
 
     # ── Check 2: null user_id ─────────────────────────────────────────────
     null_user = valid_df.filter(F.col("user_id").isNull() | (F.trim(F.col("user_id")) == ""))
-    valid_df  = valid_df.filter(F.col("user_id").isNotNull() & (F.trim(F.col("user_id")) != ""))
+    valid_df = valid_df.filter(F.col("user_id").isNotNull() & (F.trim(F.col("user_id")) != ""))
     if null_user.count() > 0:
         write_rejected(null_user, args, job_run_id, "null_user_id")
 
@@ -277,37 +281,31 @@ def validate(df: DataFrame, args: dict, job_run_id: str, spark: SparkSession) ->
 
     # ── Check 5: reordered must be exactly 0 or 1 ─────────────────────────
     invalid_reorder = valid_df.filter(~F.col("reordered").isin(0, 1))
-    valid_df         = valid_df.filter(F.col("reordered").isin(0, 1))
+    valid_df = valid_df.filter(F.col("reordered").isin(0, 1))
     if invalid_reorder.count() > 0:
         write_rejected(invalid_reorder, args, job_run_id, "invalid_reordered_flag")
 
     # ── Check 6: add_to_cart_order must be positive ────────────────────────
     invalid_cart = valid_df.filter(F.col("add_to_cart_order") <= 0)
-    valid_df      = valid_df.filter(F.col("add_to_cart_order") > 0)
+    valid_df = valid_df.filter(F.col("add_to_cart_order") > 0)
     if invalid_cart.count() > 0:
         write_rejected(invalid_cart, args, job_run_id, "invalid_cart_order")
 
     # ── Check 7: days_since_prior_order range (0–365 when non-null) ────────
     invalid_days = valid_df.filter(
-        F.col("days_since_prior_order").isNotNull() &
-        (
-            (F.col("days_since_prior_order") < 0) |
-            (F.col("days_since_prior_order") > MAX_DAYS_SINCE_PRIOR)
-        )
+        F.col("days_since_prior_order").isNotNull()
+        & ((F.col("days_since_prior_order") < 0) | (F.col("days_since_prior_order") > MAX_DAYS_SINCE_PRIOR))
     )
     valid_df = valid_df.filter(
-        F.col("days_since_prior_order").isNull() |
-        (
-            (F.col("days_since_prior_order") >= 0) &
-            (F.col("days_since_prior_order") <= MAX_DAYS_SINCE_PRIOR)
-        )
+        F.col("days_since_prior_order").isNull()
+        | ((F.col("days_since_prior_order") >= 0) & (F.col("days_since_prior_order") <= MAX_DAYS_SINCE_PRIOR))
     )
     if invalid_days.count() > 0:
         write_rejected(invalid_days, args, job_run_id, "invalid_days_since_prior_order")
 
     # ── Check 8: product_id must be a positive integer ─────────────────────
     invalid_pid = valid_df.filter(F.col("product_id") <= 0)
-    valid_df     = valid_df.filter(F.col("product_id") > 0)
+    valid_df = valid_df.filter(F.col("product_id") > 0)
     if invalid_pid.count() > 0:
         write_rejected(invalid_pid, args, job_run_id, "invalid_product_id_value")
 
@@ -316,7 +314,7 @@ def validate(df: DataFrame, args: dict, job_run_id: str, spark: SparkSession) ->
         "_ts_cast",
         F.to_timestamp(F.col("order_timestamp"), TIMESTAMP_FORMAT),
     )
-    bad_ts   = valid_df.filter(F.col("_ts_cast").isNull())
+    bad_ts = valid_df.filter(F.col("_ts_cast").isNull())
     valid_df = valid_df.filter(F.col("_ts_cast").isNotNull())
     if bad_ts.count() > 0:
         write_rejected(bad_ts.drop("_ts_cast"), args, job_run_id, "invalid_timestamp_format")
@@ -325,7 +323,7 @@ def validate(df: DataFrame, args: dict, job_run_id: str, spark: SparkSession) ->
     # ── Check 10: future timestamp ────────────────────────────────────────
     future_cutoff = now_utc + timedelta(hours=FUTURE_TOLERANCE_HOURS)
     future_ts = valid_df.filter(F.col("order_timestamp") > F.lit(future_cutoff))
-    valid_df   = valid_df.filter(F.col("order_timestamp") <= F.lit(future_cutoff))
+    valid_df = valid_df.filter(F.col("order_timestamp") <= F.lit(future_cutoff))
     if future_ts.count() > 0:
         write_rejected(future_ts, args, job_run_id, "future_timestamp")
 
@@ -333,21 +331,16 @@ def validate(df: DataFrame, args: dict, job_run_id: str, spark: SparkSession) ->
     valid_df = valid_df.withColumn("_date_derived", F.to_date(F.col("order_timestamp")))
     valid_df = valid_df.withColumn(
         "_date_cast",
-        F.when(F.col("date").isNull(), F.col("_date_derived"))
-         .otherwise(F.to_date(F.col("date"), "yyyy-MM-dd")),
+        F.when(F.col("date").isNull(), F.col("_date_derived")).otherwise(F.to_date(F.col("date"), "yyyy-MM-dd")),
     )
-    date_mismatch = valid_df.filter(
-        F.col("date").isNotNull() &
-        (F.col("_date_cast") != F.col("_date_derived"))
-    )
-    valid_df = valid_df.filter(
-        F.col("date").isNull() |
-        (F.col("_date_cast") == F.col("_date_derived"))
-    )
+    date_mismatch = valid_df.filter(F.col("date").isNotNull() & (F.col("_date_cast") != F.col("_date_derived")))
+    valid_df = valid_df.filter(F.col("date").isNull() | (F.col("_date_cast") == F.col("_date_derived")))
     if date_mismatch.count() > 0:
         write_rejected(
             date_mismatch.drop("_date_derived", "_date_cast"),
-            args, job_run_id, "date_timestamp_mismatch",
+            args,
+            job_run_id,
+            "date_timestamp_mismatch",
         )
     valid_df = valid_df.drop("date", "_date_derived").withColumnRenamed("_date_cast", "date")
 
@@ -357,8 +350,8 @@ def validate(df: DataFrame, args: dict, job_run_id: str, spark: SparkSession) ->
     # ── Check 14: intra-batch deduplication ───────────────────────────────
     # Composite key dedup: (id, order_id) — keep the record with the latest
     # order_timestamp within the batch (last-write-wins for re-submissions).
-    window   = Window.partitionBy("id", "order_id").orderBy(F.col("order_timestamp").desc())
-    ranked   = valid_df.withColumn("_row_rank", F.row_number().over(window))
+    window = Window.partitionBy("id", "order_id").orderBy(F.col("order_timestamp").desc())
+    ranked = valid_df.withColumn("_row_rank", F.row_number().over(window))
 
     intra_dupes = ranked.filter(F.col("_row_rank") > 1).drop("_row_rank")
     if intra_dupes.count() > 0:
@@ -368,14 +361,13 @@ def validate(df: DataFrame, args: dict, job_run_id: str, spark: SparkSession) ->
 
     # Trim string identifier columns
     valid_df = valid_df.withColumn("order_id", F.trim(F.col("order_id")))
-    valid_df = valid_df.withColumn("user_id",  F.trim(F.col("user_id")))
+    valid_df = valid_df.withColumn("user_id", F.trim(F.col("user_id")))
 
-    valid_count    = valid_df.count()
+    valid_count = valid_df.count()
     total_rejected = total - valid_count
     log_counts("order_items:validate", total, valid_count, total_rejected)
 
     return valid_df
-
 
 
 # Stage 3 — Delta MERGE (upsert with timestamp guard)
@@ -412,7 +404,8 @@ def merge_into_delta(spark, valid_df: DataFrame, args: dict) -> str:
 
     logger.info(
         "Merging %d valid order_item rows into %s",
-        valid_df.count(), table_path,
+        valid_df.count(),
+        table_path,
     )
 
     (
@@ -423,9 +416,7 @@ def merge_into_delta(spark, valid_df: DataFrame, args: dict) -> str:
             "target.id = source.id AND target.order_id = source.order_id",
         )
         # Only overwrite if incoming record is newer (stale-delivery guard)
-        .whenMatchedUpdateAll(
-            condition="source.order_timestamp > target.order_timestamp"
-        )
+        .whenMatchedUpdateAll(condition="source.order_timestamp > target.order_timestamp")
         .whenNotMatchedInsertAll()
         .execute()
     )
@@ -437,15 +428,12 @@ def merge_into_delta(spark, valid_df: DataFrame, args: dict) -> str:
     return table_path
 
 
-
 # Main entrypoint
 def main():
-    _, _, spark, job = build_spark_session(
-        getResolvedOptions(sys.argv, ["JOB_NAME"])["JOB_NAME"]
-    )
-    args       = parse_args()
+    _, _, spark, job = build_spark_session(getResolvedOptions(sys.argv, ["JOB_NAME"])["JOB_NAME"])
+    args = parse_args()
     job_run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
-    monitor    = PipelineMonitor(
+    monitor = PipelineMonitor(
         args["JOB_NAME"],
         SnsNotifier(args["SNS_TOPIC_ARN"], args["ENVIRONMENT"]),
     )
@@ -481,7 +469,9 @@ def main():
     except Exception as exc:
         logger.exception(
             "order_items_job FAILED | raw_key=%s | run_id=%s | error=%s",
-            args.get("RAW_KEY", "unknown"), job_run_id, exc,
+            args.get("RAW_KEY", "unknown"),
+            job_run_id,
+            exc,
         )
         raise
 

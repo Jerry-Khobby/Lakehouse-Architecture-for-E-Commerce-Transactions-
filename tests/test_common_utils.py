@@ -36,10 +36,7 @@ class TestS3Path:
         assert s3_path("my-bucket", "raw", "test.csv") == "s3://my-bucket/raw/test.csv"
 
     def test_nested_suffix_path(self):
-        assert (
-            s3_path("my-bucket", "lakehouse-dwh/", "products")
-            == "s3://my-bucket/lakehouse-dwh/products"
-        )
+        assert s3_path("my-bucket", "lakehouse-dwh/", "products") == "s3://my-bucket/lakehouse-dwh/products"
 
 
 class TestLogCounts:
@@ -84,10 +81,12 @@ class TestWriteRejected:
 
     @patch("pyspark.sql.readwriter.DataFrameWriter.parquet")
     def test_uses_per_row_reason_col_when_provided(self, mock_parquet, spark, fake_args):
-        schema = StructType([
-            StructField("id",     StringType(), True),
-            StructField("reason", StringType(), True),
-        ])
+        schema = StructType(
+            [
+                StructField("id", StringType(), True),
+                StructField("reason", StringType(), True),
+            ]
+        )
         df = spark.createDataFrame([("1", "bad_value")], schema)
         result = write_rejected(df, fake_args, "run-004", "fallback", reason_col="reason")
         assert result == 1
@@ -120,7 +119,7 @@ class TestGetRegion:
 
 class TestArchiveSourceFile:
     def _make_clients(self):
-        mock_s3  = MagicMock()
+        mock_s3 = MagicMock()
         mock_sts = MagicMock()
         mock_sts.get_caller_identity.return_value = {"Account": "123456789012"}
         return mock_s3, mock_sts
@@ -153,6 +152,7 @@ class TestUpdateCatalogTable:
 
     def test_calls_update_table_when_table_already_exists(self, fake_args):
         from glue_jobs.orders_job import ORDERS_SCHEMA
+
         mock_glue, _ = self._make_glue_mock()
         with patch("boto3.client", return_value=mock_glue):
             with patch("glue_jobs.utils.common._get_region", return_value="us-east-1"):
@@ -161,6 +161,7 @@ class TestUpdateCatalogTable:
 
     def test_falls_back_to_create_table_when_not_found(self, fake_args):
         from glue_jobs.orders_job import ORDERS_SCHEMA
+
         mock_glue, NotFoundError = self._make_glue_mock()
         mock_glue.update_table.side_effect = NotFoundError("table not found")
         with patch("boto3.client", return_value=mock_glue):
@@ -170,6 +171,7 @@ class TestUpdateCatalogTable:
 
     def test_does_not_raise_on_client_error(self, fake_args):
         from glue_jobs.orders_job import ORDERS_SCHEMA
+
         mock_glue, _ = self._make_glue_mock()
         mock_glue.update_table.side_effect = ClientError(
             {"Error": {"Code": "AccessDeniedException", "Message": "Denied"}}, "update_table"
@@ -180,6 +182,7 @@ class TestUpdateCatalogTable:
 
     def test_handles_decimal_type_in_schema(self, fake_args):
         from glue_jobs.orders_job import ORDERS_SCHEMA
+
         mock_glue, _ = self._make_glue_mock()
         with patch("boto3.client", return_value=mock_glue):
             with patch("glue_jobs.utils.common._get_region", return_value="us-east-1"):
@@ -223,21 +226,21 @@ class TestBuildSparkSession:
 
 class TestParseArgs:
     _VALID_RAW = {
-        "JOB_NAME":          "test-job",
-        "DATA_BUCKET":       "my-bucket",
-        "SCRIPTS_BUCKET":    "scripts-bucket",
-        "ENVIRONMENT":       "test",
-        "DATABASE_NAME":     "test_db",
-        "DATASET":           "products",
-        "RAW_KEY":           "raw/products.csv",
-        "RAW_PREFIX":        "raw/",
-        "PROCESSED_PREFIX":  "lakehouse-dwh/",
-        "ARCHIVED_PREFIX":   "archived/",
-        "REJECTED_PREFIX":   "rejected/",
-        "FLAGGED_PREFIX":    "flagged/",
-        "MERGE_KEYS":        "product_id",
-        "PARTITION_COLS":    "department",
-        "SNS_TOPIC_ARN":     "arn:aws:sns:us-east-1:000000000000:test",
+        "JOB_NAME": "test-job",
+        "DATA_BUCKET": "my-bucket",
+        "SCRIPTS_BUCKET": "scripts-bucket",
+        "ENVIRONMENT": "test",
+        "DATABASE_NAME": "test_db",
+        "DATASET": "products",
+        "RAW_KEY": "raw/products.csv",
+        "RAW_PREFIX": "raw/",
+        "PROCESSED_PREFIX": "lakehouse-dwh/",
+        "ARCHIVED_PREFIX": "archived/",
+        "REJECTED_PREFIX": "rejected/",
+        "FLAGGED_PREFIX": "flagged/",
+        "MERGE_KEYS": "product_id",
+        "PARTITION_COLS": "department",
+        "SNS_TOPIC_ARN": "arn:aws:sns:us-east-1:000000000000:test",
     }
 
     def test_returns_dict_with_split_list_fields(self):
@@ -271,6 +274,7 @@ class TestParseArgs:
 class TestEnsureDeltaTable:
     def test_skips_init_when_table_already_exists(self, spark):
         from glue_jobs.orders_job import ORDERS_SCHEMA
+
         with patch("glue_jobs.utils.common.DeltaTable.isDeltaTable", return_value=True):
             with patch.object(spark, "sql") as mock_sql:
                 ensure_delta_table(spark, "s3://b/orders/", ORDERS_SCHEMA, ["date"], "orders", "db")
@@ -278,6 +282,7 @@ class TestEnsureDeltaTable:
 
     def test_creates_table_when_it_does_not_exist(self, spark):
         from glue_jobs.orders_job import ORDERS_SCHEMA
+
         mock_df = MagicMock()
         with patch("glue_jobs.utils.common.DeltaTable.isDeltaTable", return_value=False):
             with patch.object(spark, "createDataFrame", return_value=mock_df):
@@ -287,6 +292,7 @@ class TestEnsureDeltaTable:
 
     def test_creates_table_without_partition_cols(self, spark):
         from glue_jobs.orders_job import ORDERS_SCHEMA
+
         mock_df = MagicMock()
         with patch("glue_jobs.utils.common.DeltaTable.isDeltaTable", return_value=False):
             with patch.object(spark, "createDataFrame", return_value=mock_df):

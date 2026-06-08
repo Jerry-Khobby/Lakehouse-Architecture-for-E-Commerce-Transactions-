@@ -24,13 +24,13 @@ import openpyxl
 
 # Path(__file__).resolve() makes the path absolute before traversing so the
 # script works correctly regardless of which directory it is run from.
-PROJECT_ROOT  = Path(__file__).resolve().parent.parent
-DATA_DIR      = PROJECT_ROOT / "Data"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DATA_DIR = PROJECT_ROOT / "Data"
 TERRAFORM_DIR = PROJECT_ROOT / "terraform"
 
 DATASETS = [
-    {"file": "products.csv",              "key": "raw/products.csv"},
-    {"file": "orders_apr_2025.xlsx",      "key": "raw/orders_apr_2025.csv"},
+    {"file": "products.csv", "key": "raw/products.csv"},
+    {"file": "orders_apr_2025.xlsx", "key": "raw/orders_apr_2025.csv"},
     {"file": "order_items_apr_2025.xlsx", "key": "raw/order_items_apr_2025.csv"},
 ]
 
@@ -57,9 +57,9 @@ def fetch_bucket_name() -> str:
 
 def xlsx_to_csv_bytes(path: Path) -> bytes:
     workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
-    sheet    = workbook.active
-    buffer   = io.StringIO()
-    writer   = csv.writer(buffer, lineterminator="\n")
+    sheet = workbook.active
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, lineterminator="\n")
     for row in sheet.iter_rows(values_only=True):
         writer.writerow(["" if cell is None else cell for cell in row])
     workbook.close()

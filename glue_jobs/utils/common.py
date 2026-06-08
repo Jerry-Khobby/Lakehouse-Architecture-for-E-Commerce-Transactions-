@@ -29,7 +29,6 @@ from pyspark.sql import functions as F
 from pyspark.sql.types import StructType
 from delta.tables import DeltaTable
 
-
 # Logging
 
 
@@ -55,15 +54,14 @@ def build_spark_session(job_name: str) -> tuple:
 
     Returns: (sc, glue_ctx, spark, job)
     """
-    sc       = SparkContext.getOrCreate()
+    sc = SparkContext.getOrCreate()
     glue_ctx = GlueContext(sc)
-    spark    = glue_ctx.spark_session
+    spark = glue_ctx.spark_session
 
     active_extensions = spark.conf.get("spark.sql.extensions", "")
     if "DeltaSparkSessionExtension" not in active_extensions:
         raise RuntimeError(
-            "Delta Lake extensions not loaded. "
-            "Check --conf spark.sql.extensions in Glue job default_arguments."
+            "Delta Lake extensions not loaded. " "Check --conf spark.sql.extensions in Glue job default_arguments."
         )
 
     job = Job(glue_ctx)
@@ -83,15 +81,15 @@ REQUIRED_ARGS = [
     "ENVIRONMENT",
     "DATABASE_NAME",
     "DATASET",
-    "RAW_KEY",          # exact S3 key of the file that triggered EventBridge
+    "RAW_KEY",  # exact S3 key of the file that triggered EventBridge
     "RAW_PREFIX",
     "PROCESSED_PREFIX",
     "ARCHIVED_PREFIX",
     "REJECTED_PREFIX",
-    "FLAGGED_PREFIX",   # soft-flagged records that pass but need analyst review
-    "MERGE_KEYS",       # comma-separated e.g. "order_id" or "id,order_id"
-    "PARTITION_COLS",   # comma-separated e.g. "date" or "department"
-    "SNS_TOPIC_ARN",    # SNS topic for stage-level alerts
+    "FLAGGED_PREFIX",  # soft-flagged records that pass but need analyst review
+    "MERGE_KEYS",  # comma-separated e.g. "order_id" or "id,order_id"
+    "PARTITION_COLS",  # comma-separated e.g. "date" or "department"
+    "SNS_TOPIC_ARN",  # SNS topic for stage-level alerts
 ]
 
 
@@ -103,8 +101,8 @@ def parse_args() -> dict:
     """
     raw = getResolvedOptions(sys.argv, REQUIRED_ARGS)
 
-    raw["MERGE_KEYS_LIST"]    = [k.strip() for k in raw["MERGE_KEYS"].split(",")    if k.strip()]
-    raw["PARTITION_COLS_LIST"]= [c.strip() for c in raw["PARTITION_COLS"].split(",") if c.strip()]
+    raw["MERGE_KEYS_LIST"] = [k.strip() for k in raw["MERGE_KEYS"].split(",") if k.strip()]
+    raw["PARTITION_COLS_LIST"] = [c.strip() for c in raw["PARTITION_COLS"].split(",") if c.strip()]
 
     for key in ("DATA_BUCKET", "DATASET", "RAW_KEY", "DATABASE_NAME"):
         if not raw.get(key, "").strip():
@@ -112,7 +110,9 @@ def parse_args() -> dict:
 
     logger.info(
         "Job args parsed | dataset=%s | raw_key=%s | environment=%s",
-        raw["DATASET"], raw["RAW_KEY"], raw["ENVIRONMENT"],
+        raw["DATASET"],
+        raw["RAW_KEY"],
+        raw["ENVIRONMENT"],
     )
     return raw
 
@@ -140,7 +140,7 @@ def write_rejected(
     if count == 0:
         return 0
 
-    run_date    = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    run_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     output_path = (
         f"s3://{args['DATA_BUCKET']}/"
         f"{args['REJECTED_PREFIX'].rstrip('/')}/{args['DATASET']}/"
@@ -148,21 +148,22 @@ def write_rejected(
     )
 
     out_df = (
-        df
-        .withColumn(
+        df.withColumn(
             "rejection_reason",
             F.col(reason_col) if reason_col else F.lit(rejection_reason),
         )
-        .withColumn("_rejected_at",  F.current_timestamp())
-        .withColumn("_job_run_id",   F.lit(job_run_id))
-        .withColumn("_source_key",   F.lit(args["RAW_KEY"]))
+        .withColumn("_rejected_at", F.current_timestamp())
+        .withColumn("_job_run_id", F.lit(job_run_id))
+        .withColumn("_source_key", F.lit(args["RAW_KEY"]))
     )
 
     out_df.write.mode("append").parquet(output_path)
 
     logger.warning(
         "Wrote %d rejected rows | reason=%s | path=%s",
-        count, rejection_reason, output_path,
+        count,
+        rejection_reason,
+        output_path,
     )
     return count
 
@@ -181,18 +182,15 @@ def archive_source_file(args: dict) -> None:
     This function logs but does NOT re-raise on ClientError so that a failed
     archive never marks an otherwise-successful pipeline run as failed.
     """
-    s3         = boto3.client("s3")
-    sts        = boto3.client("sts")
-    bucket     = args["DATA_BUCKET"]
+    s3 = boto3.client("s3")
+    sts = boto3.client("sts")
+    bucket = args["DATA_BUCKET"]
     source_key = args["RAW_KEY"]
     account_id = sts.get_caller_identity()["Account"]
 
     filename = source_key.split("/")[-1]
     run_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    dest_key = (
-        f"{args['ARCHIVED_PREFIX'].rstrip('/')}/{args['DATASET']}/"
-        f"{run_date}/{filename}"
-    )
+    dest_key = f"{args['ARCHIVED_PREFIX'].rstrip('/')}/{args['DATASET']}/" f"{run_date}/{filename}"
 
     try:
         s3.copy_object(
@@ -203,7 +201,10 @@ def archive_source_file(args: dict) -> None:
         )
         logger.info(
             "Archived: s3://%s/%s → s3://%s/%s",
-            bucket, source_key, bucket, dest_key,
+            bucket,
+            source_key,
+            bucket,
+            dest_key,
         )
 
         s3.delete_object(
@@ -218,7 +219,8 @@ def archive_source_file(args: dict) -> None:
         # when the Delta write already committed successfully.
         logger.exception(
             "Archive step failed for s3://%s/%s",
-            bucket, source_key,
+            bucket,
+            source_key,
         )
 
 
@@ -282,7 +284,9 @@ def ensure_delta_table(
 
     logger.info(
         "Delta table initialised and registered: %s.%s at %s",
-        database_name, table_name, table_path,
+        database_name,
+        table_name,
+        table_path,
     )
 
 
@@ -306,26 +310,34 @@ def update_catalog_table(
     Column list is built from the StructType, with partition columns separated
     into PartitionKeys as the Glue API requires.
     """
-    glue     = boto3.client("glue", region_name=_get_region())
+    glue = boto3.client("glue", region_name=_get_region())
     database = args["DATABASE_NAME"]
 
     non_partition_cols = [f for f in schema.fields if f.name not in partition_cols]
-    partition_fields   = [f for f in schema.fields if f.name in partition_cols]
+    partition_fields = [f for f in schema.fields if f.name in partition_cols]
 
     def _to_glue_type(dtype) -> str:
         from pyspark.sql.types import (
-            StringType, IntegerType, LongType, DoubleType,
-            FloatType, BooleanType, TimestampType, DateType, DecimalType,
+            StringType,
+            IntegerType,
+            LongType,
+            DoubleType,
+            FloatType,
+            BooleanType,
+            TimestampType,
+            DateType,
+            DecimalType,
         )
+
         mapping = {
-            StringType:    "string",
-            IntegerType:   "int",
-            LongType:      "bigint",
-            DoubleType:    "double",
-            FloatType:     "float",
-            BooleanType:   "boolean",
+            StringType: "string",
+            IntegerType: "int",
+            LongType: "bigint",
+            DoubleType: "double",
+            FloatType: "float",
+            BooleanType: "boolean",
             TimestampType: "timestamp",
-            DateType:      "date",
+            DateType: "date",
         }
         if isinstance(dtype, DecimalType):
             return f"decimal({dtype.precision},{dtype.scale})"
@@ -333,37 +345,27 @@ def update_catalog_table(
 
     table_input = {
         "Name": table_name,
-        "Description": (
-            f"Delta Lake table managed by Lakehouse ETL — {args['ENVIRONMENT']}"
-        ),
+        "Description": (f"Delta Lake table managed by Lakehouse ETL — {args['ENVIRONMENT']}"),
         "StorageDescriptor": {
-            "Columns": [
-                {"Name": f.name, "Type": _to_glue_type(f.dataType)}
-                for f in non_partition_cols
-            ],
+            "Columns": [{"Name": f.name, "Type": _to_glue_type(f.dataType)} for f in non_partition_cols],
             "Location": table_path,
-            "InputFormat":  "org.apache.hadoop.mapred.SequenceFileInputFormat",
+            "InputFormat": "org.apache.hadoop.mapred.SequenceFileInputFormat",
             "OutputFormat": "org.apache.hadoop.hive.ql.io.HiveSequenceFileOutputFormat",
             "SerdeInfo": {
-                "SerializationLibrary": (
-                    "org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe"
-                ),
+                "SerializationLibrary": ("org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe"),
             },
         },
-        "PartitionKeys": [
-            {"Name": f.name, "Type": _to_glue_type(f.dataType)}
-            for f in partition_fields
-        ],
+        "PartitionKeys": [{"Name": f.name, "Type": _to_glue_type(f.dataType)} for f in partition_fields],
         "TableType": "EXTERNAL_TABLE",
         "Parameters": {
-            "classification":                    "delta",
-            "spark.sql.sources.provider":        "delta",
+            "classification": "delta",
+            "spark.sql.sources.provider": "delta",
             "spark.sql.sources.schema.numParts": "1",
             # Delta protocol version markers — Athena engine v3 reads these
             # from the table Parameters to confirm Delta Lake compatibility
             # before falling back to the _delta_log/ transaction log.
-            "delta.minReaderVersion":            "1",
-            "delta.minWriterVersion":            "2",
+            "delta.minReaderVersion": "1",
+            "delta.minWriterVersion": "2",
         },
     }
 
@@ -425,6 +427,9 @@ def log_counts(label: str, total: int, valid: int, rejected: int) -> None:
     """Emit a one-line structured validation summary to CloudWatch."""
     logger.info(
         "%s | total_read=%d | valid=%d | rejected=%d | pass_rate=%.1f%%",
-        label, total, valid, rejected,
+        label,
+        total,
+        valid,
+        rejected,
         (valid / total * 100) if total > 0 else 0.0,
     )

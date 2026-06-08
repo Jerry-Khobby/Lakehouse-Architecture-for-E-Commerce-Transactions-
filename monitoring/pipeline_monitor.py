@@ -6,14 +6,14 @@ logger = logging.getLogger(__name__)
 
 SECTION_LINE = "─" * 56
 SUMMARY_LINE = "═" * 56
-STAGE_WIDTH  = 44
+STAGE_WIDTH = 44
 
 
 class PipelineMonitor:
 
     def __init__(self, jobName, notifier=None):
-        self._jobName      = jobName
-        self._notifier     = notifier
+        self._jobName = jobName
+        self._notifier = notifier
         self._stageTimings = {}
 
     @contextmanager
@@ -37,8 +37,7 @@ class PipelineMonitor:
 
         except Exception as error:
             elapsed = time.time() - startTime
-            logger.error("  [FAILED] %s — %.1fs | job=%s | reason=%s",
-                         stageName, elapsed, self._jobName, error)
+            logger.error("  [FAILED] %s — %.1fs | job=%s | reason=%s", stageName, elapsed, self._jobName, error)
 
             if self._notifier:
                 self._notifier.sendJobFailed(self._jobName, stageName, error)
@@ -57,8 +56,4 @@ class PipelineMonitor:
 
         # Send overall job completion to Slack
         if self._notifier:
-            self._notifier.sendJobSucceeded(
-                self._jobName,
-                "All stages complete",
-                total
-            )
+            self._notifier.sendJobSucceeded(self._jobName, "All stages complete", total)

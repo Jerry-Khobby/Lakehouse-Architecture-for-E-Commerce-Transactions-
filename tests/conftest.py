@@ -33,14 +33,14 @@ sys.modules["delta.tables"] = _delta_mock.tables
 
 # ── SparkSession fixture ───────────────────────────────────────────────────────
 
+
 @pytest.fixture(scope="session")
 def spark():
     """Session-scoped local SparkSession shared across all tests."""
     from pyspark.sql import SparkSession
 
     session = (
-        SparkSession.builder
-        .master("local[2]")
+        SparkSession.builder.master("local[2]")
         .appName("lakehouse-unit-tests")
         .config("spark.ui.enabled", "false")
         .config("spark.sql.shuffle.partitions", "2")
@@ -53,25 +53,26 @@ def spark():
 
 # ── Shared fake args fixture ───────────────────────────────────────────────────
 
+
 @pytest.fixture
 def fake_args():
     """Minimal job args dict accepted by all validate() functions."""
     return {
-        "JOB_NAME":           "test-job",
-        "DATA_BUCKET":        "test-bucket",
-        "SCRIPTS_BUCKET":     "test-scripts-bucket",
-        "ENVIRONMENT":        "test",
-        "DATABASE_NAME":      "test_db",
-        "DATASET":            "test",
-        "RAW_KEY":            "raw/test.csv",
-        "RAW_PREFIX":         "raw/",
-        "PROCESSED_PREFIX":   "lakehouse-dwh/",
-        "ARCHIVED_PREFIX":    "archived/",
-        "REJECTED_PREFIX":    "rejected/",
-        "FLAGGED_PREFIX":     "flagged/",
-        "MERGE_KEYS":         "product_id",
-        "MERGE_KEYS_LIST":    ["product_id"],
-        "PARTITION_COLS":     "department",
+        "JOB_NAME": "test-job",
+        "DATA_BUCKET": "test-bucket",
+        "SCRIPTS_BUCKET": "test-scripts-bucket",
+        "ENVIRONMENT": "test",
+        "DATABASE_NAME": "test_db",
+        "DATASET": "test",
+        "RAW_KEY": "raw/test.csv",
+        "RAW_PREFIX": "raw/",
+        "PROCESSED_PREFIX": "lakehouse-dwh/",
+        "ARCHIVED_PREFIX": "archived/",
+        "REJECTED_PREFIX": "rejected/",
+        "FLAGGED_PREFIX": "flagged/",
+        "MERGE_KEYS": "product_id",
+        "MERGE_KEYS_LIST": ["product_id"],
+        "PARTITION_COLS": "department",
         "PARTITION_COLS_LIST": ["department"],
-        "SNS_TOPIC_ARN":      "arn:aws:sns:us-east-1:000000000000:test-topic",
+        "SNS_TOPIC_ARN": "arn:aws:sns:us-east-1:000000000000:test-topic",
     }
