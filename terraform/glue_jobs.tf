@@ -91,7 +91,7 @@ locals {
     # " --conf " between them. A Terraform map cannot hold two keys both named
     # "--conf"; this single-key chaining is the AWS-documented pattern and Glue
     # forwards each token to spark-submit as a separate --conf flag.
-    "--conf" = "spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog --conf spark.delta.logStore.class=org.apache.spark.sql.delta.storage.S3SingleDriverLogStore"
+    "--conf" = "spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog --conf spark.delta.logStore.class=org.apache.spark.sql.delta.storage.S3SingleDriverLogStore --conf spark.sql.warehouse.dir=s3://${aws_s3_bucket.data.id}/glue-temp/spark-warehouse/"
     # Spark staging area for shuffle spill and Delta merge commit staging.
     # Must point to a bucket where the Glue role has full read/write/delete.
     # The data bucket satisfies this — scripts and logs buckets do not.

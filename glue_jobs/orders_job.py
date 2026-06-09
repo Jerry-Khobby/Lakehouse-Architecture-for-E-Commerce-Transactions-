@@ -299,8 +299,6 @@ def merge_into_delta(spark, valid_df: DataFrame, args: dict) -> str:
         table_path=table_path,
         schema=ORDERS_SCHEMA,
         partition_cols=args["PARTITION_COLS_LIST"],
-        table_name=TABLE_NAME,
-        database_name=args["DATABASE_NAME"],
     )
 
     delta_table = DeltaTable.forPath(spark, table_path)

@@ -276,9 +276,9 @@ class TestEnsureDeltaTable:
         from glue_jobs.orders_job import ORDERS_SCHEMA
 
         with patch("glue_jobs.utils.common.DeltaTable.isDeltaTable", return_value=True):
-            with patch.object(spark, "sql") as mock_sql:
-                ensure_delta_table(spark, "s3://b/orders/", ORDERS_SCHEMA, ["date"], "orders", "db")
-        mock_sql.assert_not_called()
+            with patch.object(spark, "createDataFrame") as mock_create:
+                ensure_delta_table(spark, "s3://b/orders/", ORDERS_SCHEMA, ["date"])
+        mock_create.assert_not_called()
 
     def test_creates_table_when_it_does_not_exist(self, spark):
         from glue_jobs.orders_job import ORDERS_SCHEMA
@@ -286,9 +286,8 @@ class TestEnsureDeltaTable:
         mock_df = MagicMock()
         with patch("glue_jobs.utils.common.DeltaTable.isDeltaTable", return_value=False):
             with patch.object(spark, "createDataFrame", return_value=mock_df):
-                with patch.object(spark, "sql") as mock_sql:
-                    ensure_delta_table(spark, "s3://b/orders/", ORDERS_SCHEMA, ["date"], "orders", "db")
-        mock_sql.assert_called_once()
+                ensure_delta_table(spark, "s3://b/orders/", ORDERS_SCHEMA, ["date"])
+        mock_df.write.format.assert_called_once_with("delta")
 
     def test_creates_table_without_partition_cols(self, spark):
         from glue_jobs.orders_job import ORDERS_SCHEMA
@@ -296,6 +295,5 @@ class TestEnsureDeltaTable:
         mock_df = MagicMock()
         with patch("glue_jobs.utils.common.DeltaTable.isDeltaTable", return_value=False):
             with patch.object(spark, "createDataFrame", return_value=mock_df):
-                with patch.object(spark, "sql") as mock_sql:
-                    ensure_delta_table(spark, "s3://b/orders/", ORDERS_SCHEMA, [], "orders", "db")
-        mock_sql.assert_called_once()
+                ensure_delta_table(spark, "s3://b/orders/", ORDERS_SCHEMA, [])
+        mock_df.write.format.assert_called_once_with("delta")

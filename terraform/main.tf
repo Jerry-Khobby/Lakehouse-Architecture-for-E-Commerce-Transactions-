@@ -511,8 +511,10 @@ resource "aws_glue_crawler" "products" {
   description   = "Crawls products Delta table and updates catalog"
 
   delta_target {
-    delta_tables   = ["s3://${aws_s3_bucket.data.id}/${var.processed_data_prefix}products/"]
-    write_manifest = false
+    delta_tables              = ["s3://${aws_s3_bucket.data.id}/${var.processed_data_prefix}products/"]
+    write_manifest            = false
+    # Athena engine v3 requires native Delta table format for proper schema resolution under Lake Formation.
+    create_native_delta_table = true
   }
 
   schema_change_policy {
@@ -538,8 +540,9 @@ resource "aws_glue_crawler" "orders" {
   description   = "Crawls orders Delta table and updates catalog"
 
   delta_target {
-    delta_tables   = ["s3://${aws_s3_bucket.data.id}/${var.processed_data_prefix}orders/"]
-    write_manifest = false
+    delta_tables              = ["s3://${aws_s3_bucket.data.id}/${var.processed_data_prefix}orders/"]
+    write_manifest            = false
+    create_native_delta_table = true
   }
 
   schema_change_policy {
@@ -564,8 +567,9 @@ resource "aws_glue_crawler" "order_items" {
   description   = "Crawls order_items Delta table and updates catalog"
 
   delta_target {
-    delta_tables   = ["s3://${aws_s3_bucket.data.id}/${var.processed_data_prefix}order_items/"]
-    write_manifest = false
+    delta_tables              = ["s3://${aws_s3_bucket.data.id}/${var.processed_data_prefix}order_items/"]
+    write_manifest            = false
+    create_native_delta_table = true
   }
 
   schema_change_policy {

@@ -237,8 +237,6 @@ def ensure_delta_table(
     table_path: str,
     schema: StructType,
     partition_cols: List[str],
-    table_name: str,
-    database_name: str,
 ) -> None:
     """
     Ensure the Delta table exists at table_path before any MERGE runs.
@@ -273,28 +271,11 @@ def ensure_delta_table(
         writer = writer.partitionBy(*partition_cols)
     writer.save(table_path)
 
-    # Register in Glue Data Catalog so Athena can query it immediately
-    # without waiting for a crawler to run.
-    # PARTITIONED BY is intentionally omitted: Spark SQL raises
-    # "AnalysisException: It is not allowed to specify partitioning when the
-    # table schema is not defined" when PARTITIONED BY appears without inline
-    # column definitions. Delta already persisted the schema and partition spec
-    # to _delta_log/ in the write above — the CREATE TABLE just registers the
-    # existing table in the catalog and reads everything from the Delta log.
-    spark.sql(
-        f"""
-        CREATE TABLE IF NOT EXISTS `{database_name}`.`{table_name}`
-        USING DELTA
-        LOCATION '{table_path}'
-    """
-    )
-
-    logger.info(
-        "Delta table initialised and registered: %s.%s at %s",
-        database_name,
-        table_name,
-        table_path,
-    )
+    # Catalog registration is deferred to update_catalog_table() in main(),
+    # which uses boto3 directly and avoids spark.sql.warehouse.dir being unset
+    # on Glue 4.0 (which causes "Can not create a Path from an empty string"
+    # when Spark SQL executes CREATE TABLE without an explicit warehouse dir).
+    logger.info("Delta table initialised at %s", table_path)
 
 
 # Glue Data Catalog registrar
@@ -367,10 +348,10 @@ def update_catalog_table(
         "Parameters": {
             "classification": "delta",
             "spark.sql.sources.provider": "delta",
-            "spark.sql.sources.schema.numParts": "1",
-            # Delta protocol version markers — Athena engine v3 reads these
-            # from the table Parameters to confirm Delta Lake compatibility
-            # before falling back to the _delta_log/ transaction log.
+            # Athena engine v3 Delta Lake reader requires an explicit "path" parameter.
+            # It does NOT fall back to StorageDescriptor.Location, even when that is set.
+            # Without this, Athena raises: DELTA_LAKE_INVALID_SCHEMA: No path property defined.
+            "path": table_path,
             "delta.minReaderVersion": "1",
             "delta.minWriterVersion": "2",
         },
