@@ -493,10 +493,21 @@ resource "aws_iam_role_policy" "sfn_glue" {
 # GLUE DATA CATALOG
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Register the Terraform caller as a Lake Formation data lake admin so it can
-# grant LF permissions on the catalog database and tables below.
-resource "aws_lakeformation_data_lake_settings" "admin" {
+# Switch Lake Formation to IAM-only mode for the whole account.
+# This means column/row access is governed by IAM policies alone —
+# no LF column filters can silently block Athena column resolution.
+resource "aws_lakeformation_data_lake_settings" "account" {
   admins = [data.aws_caller_identity.current.arn]
+
+  create_database_default_permissions {
+    permissions = ["ALL"]
+    principal   = "IAM_ALLOWED_PRINCIPALS"
+  }
+
+  create_table_default_permissions {
+    permissions = ["ALL"]
+    principal   = "IAM_ALLOWED_PRINCIPALS"
+  }
 }
 
 resource "aws_glue_catalog_database" "lakehouse" {
@@ -504,51 +515,9 @@ resource "aws_glue_catalog_database" "lakehouse" {
   description = "E-commerce lakehouse Delta Lake tables — ${var.environment}"
 
   create_table_default_permission {
-    permissions = ["SELECT"]
+    permissions = ["ALL"]
     principal { data_lake_principal_identifier = "IAM_ALLOWED_PRINCIPALS" }
   }
-}
-
-# -- Lake Formation permissions -----------------------------------------------
-# LF hybrid-access mode (IAM_ALLOWED_PRINCIPALS + SELECT) bypasses LF for data
-# reads but table WRITE operations (UpdateTable, DeleteTable) still require an
-# explicit LF ALTER grant. Without it update_catalog_table() boto3 UpdateTable
-# calls are silently blocked — StorageDescriptor.Columns stays empty and LF
-# locks column access to only the partition column visible at creation time.
-resource "aws_lakeformation_permissions" "glue_role_database" {
-  principal   = aws_iam_role.glue_role.arn
-  permissions = ["CREATE_TABLE", "ALTER", "DROP", "DESCRIBE"]
-
-  database {
-    name = aws_glue_catalog_database.lakehouse.name
-  }
-}
-
-resource "aws_lakeformation_permissions" "glue_role_tables" {
-  principal   = aws_iam_role.glue_role.arn
-  permissions = ["ALL"]
-
-  table {
-    database_name = aws_glue_catalog_database.lakehouse.name
-    wildcard      = true
-  }
-
-  depends_on = [aws_lakeformation_data_lake_settings.admin]
-}
-
-# LF table-level SELECT (without column filter) grants access to ALL columns.
-# This overrides the per-column restriction that causes Athena to fail with
-# DELTA_LAKE_INVALID_SCHEMA even when the path parameter is present.
-resource "aws_lakeformation_permissions" "sfn_role_tables" {
-  principal   = aws_iam_role.sfn_role.arn
-  permissions = ["SELECT", "DESCRIBE"]
-
-  table {
-    database_name = aws_glue_catalog_database.lakehouse.name
-    wildcard      = true
-  }
-
-  depends_on = [aws_lakeformation_data_lake_settings.admin]
 }
 
 # -- Crawlers (one per dataset so failures are isolated) ----------------------

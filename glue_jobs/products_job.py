@@ -262,8 +262,7 @@ def main():
 
         with monitor.stage("Archive"):
             archive_source_file(args)
-            
-        
+
         with monitor.stage("Catalog Update"):
             update_catalog_table(
                 args=args,

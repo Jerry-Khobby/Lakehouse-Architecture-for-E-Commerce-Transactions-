@@ -341,10 +341,10 @@ def update_catalog_table(
             "OutputFormat": "org.apache.hadoop.hive.ql.io.HiveSequenceFileOutputFormat",
             "SerdeInfo": {
                 "SerializationLibrary": "org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe",
-                "Parameters":{
-                    "path":table_path,
+                "Parameters": {
+                    "path": table_path,
                     "serialization.format": "1",
-                }
+                },
             },
         },
         "PartitionKeys": [{"Name": f.name, "Type": _to_glue_type(f.dataType)} for f in partition_fields],
@@ -358,6 +358,7 @@ def update_catalog_table(
             "path": table_path,
             "delta.minReaderVersion": "1",
             "delta.minWriterVersion": "2",
+            "lakeformation.arn": "",
         },
     }
 
@@ -371,6 +372,20 @@ def update_catalog_table(
         # Log but do not re-raise — a catalog update failure must not fail
         # the pipeline when data is already safely written to Delta.
         logger.exception("Catalog update failed for %s.%s", database, table_name)
+
+    # Deregister from Lake Formation if it was registered — LF governance
+    # causes COLUMN_NOT_FOUND on JOINs by applying column-level filters
+    # that block named column resolution even when IAM allows full access.
+    try:
+        lf = boto3.client("lakeformation", region_name=_get_region())
+        account_id = boto3.client("sts").get_caller_identity()["Account"]
+        region = _get_region()
+        lf.deregister_resource(ResourceArn=f"arn:aws:glue:{region}:{account_id}:table/{database}/{table_name}")
+        logger.info("Deregistered %s.%s from Lake Formation", database, table_name)
+    except lf.exceptions.EntityNotFoundException:
+        pass
+    except ClientError as exc:
+        logger.warning("LF deregister skipped — %s", exc)
 
 
 # Helpers

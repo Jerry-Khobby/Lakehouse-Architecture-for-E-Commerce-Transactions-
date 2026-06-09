@@ -197,6 +197,21 @@ FROM ecom_lakehouse_db.products
 GROUP BY department
 ORDER BY products DESC;
 
+
+
+-- Verify data landed
+SELECT COUNT(*) FROM ecom_lakehouse_db.products;
+SELECT COUNT(*) FROM ecom_lakehouse_db.orders;
+SELECT COUNT(*) FROM ecom_lakehouse_db.order_items;
+
+-- Basic analytical query showing the data is usable
+SELECT p.product_name, SUM(oi.reordered) AS reorders
+FROM ecom_lakehouse_db.order_items oi
+JOIN ecom_lakehouse_db.products p ON oi.product_id = p.product_id
+GROUP BY p.product_name
+ORDER BY reorders DESC
+LIMIT 20;
+
 -- top products by reorder volume (joins all three tables)
 SELECT p.product_name, SUM(oi.reordered) AS reorders
 FROM ecom_lakehouse_db.order_items oi
