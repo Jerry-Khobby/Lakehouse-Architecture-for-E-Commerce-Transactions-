@@ -493,6 +493,12 @@ resource "aws_iam_role_policy" "sfn_glue" {
 # GLUE DATA CATALOG
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Register the Terraform caller as a Lake Formation data lake admin so it can
+# grant LF permissions on the catalog database and tables below.
+resource "aws_lakeformation_data_lake_settings" "admin" {
+  admins = [data.aws_caller_identity.current.arn]
+}
+
 resource "aws_glue_catalog_database" "lakehouse" {
   name        = var.glue_database_name
   description = "E-commerce lakehouse Delta Lake tables — ${var.environment}"
@@ -501,6 +507,48 @@ resource "aws_glue_catalog_database" "lakehouse" {
     permissions = ["SELECT"]
     principal { data_lake_principal_identifier = "IAM_ALLOWED_PRINCIPALS" }
   }
+}
+
+# -- Lake Formation permissions -----------------------------------------------
+# LF hybrid-access mode (IAM_ALLOWED_PRINCIPALS + SELECT) bypasses LF for data
+# reads but table WRITE operations (UpdateTable, DeleteTable) still require an
+# explicit LF ALTER grant. Without it update_catalog_table() boto3 UpdateTable
+# calls are silently blocked — StorageDescriptor.Columns stays empty and LF
+# locks column access to only the partition column visible at creation time.
+resource "aws_lakeformation_permissions" "glue_role_database" {
+  principal   = aws_iam_role.glue_role.arn
+  permissions = ["CREATE_TABLE", "ALTER", "DROP", "DESCRIBE"]
+
+  database {
+    name = aws_glue_catalog_database.lakehouse.name
+  }
+}
+
+resource "aws_lakeformation_permissions" "glue_role_tables" {
+  principal   = aws_iam_role.glue_role.arn
+  permissions = ["ALL"]
+
+  table {
+    database_name = aws_glue_catalog_database.lakehouse.name
+    wildcard      = true
+  }
+
+  depends_on = [aws_lakeformation_data_lake_settings.admin]
+}
+
+# LF table-level SELECT (without column filter) grants access to ALL columns.
+# This overrides the per-column restriction that causes Athena to fail with
+# DELTA_LAKE_INVALID_SCHEMA even when the path parameter is present.
+resource "aws_lakeformation_permissions" "sfn_role_tables" {
+  principal   = aws_iam_role.sfn_role.arn
+  permissions = ["SELECT", "DESCRIBE"]
+
+  table {
+    database_name = aws_glue_catalog_database.lakehouse.name
+    wildcard      = true
+  }
+
+  depends_on = [aws_lakeformation_data_lake_settings.admin]
 }
 
 # -- Crawlers (one per dataset so failures are isolated) ----------------------
@@ -513,7 +561,6 @@ resource "aws_glue_crawler" "products" {
   delta_target {
     delta_tables              = ["s3://${aws_s3_bucket.data.id}/${var.processed_data_prefix}products/"]
     write_manifest            = false
-    # Athena engine v3 requires native Delta table format for proper schema resolution under Lake Formation.
     create_native_delta_table = true
   }
 

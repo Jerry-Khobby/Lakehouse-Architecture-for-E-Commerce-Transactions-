@@ -19,9 +19,7 @@
 #             }
 #
 # Flow (strictly linear — dependency order):
-#   RunProductsJob → RunOrdersJob → RunOrderItemsJob
-#                  → RunCrawlers (parallel, 3 crawlers)
-#                  → AthenaValidation → NotifySuccess
+#   RunProductsJob → RunOrdersJob → RunOrderItemsJob → AthenaValidation → NotifySuccess
 #   any failure   → NotifyFailure → PipelineFailed
 #
 # Why linear and ordered:
@@ -141,78 +139,10 @@ resource "aws_sfn_state_machine" "etl_pipeline" {
         Retry            = local.glue_job_retry
         Catch            = local.glue_job_catch
         ResultPath       = "$.results.order_items"
-        Next             = "RunCrawlers"
+        Next             = "AthenaValidation"
       },
 
-      # ── Step 4: Refresh the Data Catalog (all three crawlers in parallel) ──
-      # A single execution owns all three crawlers, so there is no longer any
-      # cross-execution contention. A short retry covers an out-of-band /
-      # scheduled crawler that happens to be mid-run.
-      RunCrawlers = {
-        Type = "Parallel"
-        Branches = [
-          {
-            StartAt = "CrawlProducts"
-            States = {
-              CrawlProducts = {
-                Type       = "Task"
-                Resource   = "arn:aws:states:::aws-sdk:glue:startCrawler"
-                Parameters = { Name = aws_glue_crawler.products.name }
-                Retry = [{
-                  ErrorEquals     = ["Glue.CrawlerRunningException"]
-                  IntervalSeconds = 60
-                  MaxAttempts     = 3
-                  BackoffRate     = 2.0
-                }]
-                End = true
-              }
-            }
-          },
-          {
-            StartAt = "CrawlOrders"
-            States = {
-              CrawlOrders = {
-                Type       = "Task"
-                Resource   = "arn:aws:states:::aws-sdk:glue:startCrawler"
-                Parameters = { Name = aws_glue_crawler.orders.name }
-                Retry = [{
-                  ErrorEquals     = ["Glue.CrawlerRunningException"]
-                  IntervalSeconds = 60
-                  MaxAttempts     = 3
-                  BackoffRate     = 2.0
-                }]
-                End = true
-              }
-            }
-          },
-          {
-            StartAt = "CrawlOrderItems"
-            States = {
-              CrawlOrderItems = {
-                Type       = "Task"
-                Resource   = "arn:aws:states:::aws-sdk:glue:startCrawler"
-                Parameters = { Name = aws_glue_crawler.order_items.name }
-                Retry = [{
-                  ErrorEquals     = ["Glue.CrawlerRunningException"]
-                  IntervalSeconds = 60
-                  MaxAttempts     = 3
-                  BackoffRate     = 2.0
-                }]
-                End = true
-              }
-            }
-          }
-        ]
-        ResultPath = "$.results.crawlers"
-        Next       = "AthenaValidation"
-        Catch = [{
-          ErrorEquals = ["States.ALL"]
-          Next        = "NotifyFailure"
-          ResultPath  = "$.error"
-        }]
-      },
-
-      # ── Step 5: Athena smoke-test ─────────────────────────────────────────
+      # ── Step 4: Athena smoke-test ─────────────────────────────────────────
       # Confirms all three tables are queryable and report row counts.
       # ResultConfiguration is intentionally omitted: the workgroup enforces
       # its own OutputLocation and rejects any client-supplied value.
@@ -238,7 +168,7 @@ resource "aws_sfn_state_machine" "etl_pipeline" {
         Next       = "NotifySuccess"
       },
 
-      # ── Step 6a: Success notification ─────────────────────────────────────
+      # ── Step 5a: Success notification ─────────────────────────────────────
       # $.batch is part of the original input and is never overwritten, so it
       # is always readable here regardless of which states ran.
       NotifySuccess = {
@@ -252,7 +182,7 @@ resource "aws_sfn_state_machine" "etl_pipeline" {
         End = true
       },
 
-      # ── Step 6b: Failure notification ─────────────────────────────────────
+      # ── Step 5b: Failure notification ─────────────────────────────────────
       # Every Task/Parallel writes its result to a dedicated $.results.* path
       # and its error to $.error, so the original input ($.batch, $.bucket,
       # $.files) survives any failure and $.batch is always present here.

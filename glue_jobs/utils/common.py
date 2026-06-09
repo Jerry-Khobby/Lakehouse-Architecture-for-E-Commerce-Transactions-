@@ -340,7 +340,11 @@ def update_catalog_table(
             "InputFormat": "org.apache.hadoop.mapred.SequenceFileInputFormat",
             "OutputFormat": "org.apache.hadoop.hive.ql.io.HiveSequenceFileOutputFormat",
             "SerdeInfo": {
-                "SerializationLibrary": ("org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe"),
+                "SerializationLibrary": "org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe",
+                "Parameters":{
+                    "path":table_path,
+                    "serialization.format": "1",
+                }
             },
         },
         "PartitionKeys": [{"Name": f.name, "Type": _to_glue_type(f.dataType)} for f in partition_fields],
