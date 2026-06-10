@@ -193,7 +193,7 @@ def archive_source_file(args: dict) -> None:
 
     filename = source_key.split("/")[-1]
     run_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    dest_key = f"{args['ARCHIVED_PREFIX'].rstrip('/')}/{args['DATASET']}/" f"{run_date}/{filename}"
+    dest_key = f"{args['ARCHIVED_PREFIX'].rstrip('/')}/{args['DATASET']}/{run_date}/{filename}"
 
     try:
         s3.copy_object(
