@@ -289,11 +289,13 @@ def update_catalog_table(
     full_table = f"`{database}`.`{table_name}`"
 
     try:
-        spark.sql(f"""
+        spark.sql(
+            f"""
             CREATE TABLE IF NOT EXISTS {full_table}
             USING DELTA
             LOCATION '{table_path}'
-        """)
+        """
+        )
         logger.info("Catalog table registered: %s", full_table)
 
     except Exception:
