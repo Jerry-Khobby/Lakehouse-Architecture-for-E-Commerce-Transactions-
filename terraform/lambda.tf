@@ -1,4 +1,4 @@
-# ─────────────────────────────────────────────────────────────────────────────
+
 # LAMBDA — Slack notification forwarder (OPTIONAL)
 # SNS publishes to the pipeline_alerts topic; this Lambda receives the message
 # and POSTs it to the Slack incoming-webhook URL.
@@ -8,7 +8,7 @@
 # pipeline alert invokes a function that throws on urllib.urlopen("") — burning
 # invocations and littering CloudWatch with errors for a feature nobody enabled.
 # This mirrors the count guard already used on the email subscription in main.tf.
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 locals {
   slack_enabled = var.slack_webhook_url != "" ? 1 : 0

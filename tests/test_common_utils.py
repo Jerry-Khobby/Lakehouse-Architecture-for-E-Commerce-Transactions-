@@ -10,7 +10,6 @@ from botocore.exceptions import ClientError
 from pyspark.sql.types import StringType, StructField, StructType
 
 from glue_jobs.utils.common import (
-    _get_region,
     archive_source_file,
     build_spark_session,
     ensure_delta_table,
@@ -93,29 +92,6 @@ class TestWriteRejected:
         mock_parquet.assert_called_once()
 
 
-class TestGetRegion:
-    def test_falls_back_to_us_east_1_on_network_error(self):
-        with patch("urllib.request.urlopen", side_effect=OSError("timeout")):
-            assert _get_region() == "us-east-1"
-
-    def test_falls_back_to_us_east_1_on_any_unexpected_exception(self):
-        with patch("urllib.request.urlopen", side_effect=Exception("unexpected")):
-            assert _get_region() == "us-east-1"
-
-    def test_returns_region_from_imdsv2_on_success(self):
-        token_ctx = MagicMock()
-        token_ctx.__enter__ = lambda s: s
-        token_ctx.__exit__ = MagicMock(return_value=False)
-        token_ctx.read.return_value = b"mock-token"
-
-        region_ctx = MagicMock()
-        region_ctx.__enter__ = lambda s: s
-        region_ctx.__exit__ = MagicMock(return_value=False)
-        region_ctx.read.return_value = b"eu-west-1"
-
-        with patch("urllib.request.urlopen", side_effect=[token_ctx, region_ctx]):
-            assert _get_region() == "eu-west-1"
-
 
 class TestArchiveSourceFile:
     def _make_clients(self):
@@ -144,53 +120,28 @@ class TestArchiveSourceFile:
 
 
 class TestUpdateCatalogTable:
-    def _make_glue_mock(self):
-        mock_glue = MagicMock()
-        NotFoundError = type("EntityNotFoundException", (Exception,), {})
-        mock_glue.exceptions.EntityNotFoundException = NotFoundError
-        return mock_glue, NotFoundError
+    def test_calls_spark_sql_with_correct_statement(self, fake_args):
+        mock_spark = MagicMock()
+        update_catalog_table(fake_args, "orders", "s3://b/orders/", spark=mock_spark)
+        mock_spark.sql.assert_called_once()
+        sql_text = mock_spark.sql.call_args[0][0]
+        assert "CREATE TABLE IF NOT EXISTS" in sql_text
+        assert "`test_db`.`orders`" in sql_text
+        assert "USING DELTA" in sql_text
+        assert "s3://b/orders/" in sql_text
 
-    def test_calls_update_table_when_table_already_exists(self, fake_args):
-        from glue_jobs.orders_job import ORDERS_SCHEMA
+    def test_uses_getorcreate_when_spark_not_provided(self, fake_args):
+        mock_spark = MagicMock()
+        with patch("glue_jobs.utils.common.SparkSession") as mock_ss:
+            mock_ss.builder.getOrCreate.return_value = mock_spark
+            update_catalog_table(fake_args, "orders", "s3://b/orders/")
+        mock_spark.sql.assert_called_once()
 
-        mock_glue, _ = self._make_glue_mock()
-        with patch("boto3.client", return_value=mock_glue):
-            with patch("glue_jobs.utils.common._get_region", return_value="us-east-1"):
-                update_catalog_table(fake_args, "orders", "s3://b/orders/", ORDERS_SCHEMA, ["date"])
-        mock_glue.update_table.assert_called_once()
-
-    def test_falls_back_to_create_table_when_not_found(self, fake_args):
-        from glue_jobs.orders_job import ORDERS_SCHEMA
-
-        mock_glue, NotFoundError = self._make_glue_mock()
-        mock_glue.update_table.side_effect = NotFoundError("table not found")
-        with patch("boto3.client", return_value=mock_glue):
-            with patch("glue_jobs.utils.common._get_region", return_value="us-east-1"):
-                update_catalog_table(fake_args, "orders", "s3://b/orders/", ORDERS_SCHEMA, ["date"])
-        mock_glue.create_table.assert_called_once()
-
-    def test_does_not_raise_on_client_error(self, fake_args):
-        from glue_jobs.orders_job import ORDERS_SCHEMA
-
-        mock_glue, _ = self._make_glue_mock()
-        mock_glue.update_table.side_effect = ClientError(
-            {"Error": {"Code": "AccessDeniedException", "Message": "Denied"}}, "update_table"
-        )
-        with patch("boto3.client", return_value=mock_glue):
-            with patch("glue_jobs.utils.common._get_region", return_value="us-east-1"):
-                update_catalog_table(fake_args, "orders", "s3://b/orders/", ORDERS_SCHEMA, ["date"])
-
-    def test_handles_decimal_type_in_schema(self, fake_args):
-        from glue_jobs.orders_job import ORDERS_SCHEMA
-
-        mock_glue, _ = self._make_glue_mock()
-        with patch("boto3.client", return_value=mock_glue):
-            with patch("glue_jobs.utils.common._get_region", return_value="us-east-1"):
-                update_catalog_table(fake_args, "orders", "s3://b/orders/", ORDERS_SCHEMA, ["date"])
-        call_kwargs = mock_glue.update_table.call_args[1]
-        columns = call_kwargs["TableInput"]["StorageDescriptor"]["Columns"]
-        amount_col = next(c for c in columns if c["Name"] == "total_amount")
-        assert amount_col["Type"].startswith("decimal(")
+    def test_raises_when_spark_sql_fails(self, fake_args):
+        mock_spark = MagicMock()
+        mock_spark.sql.side_effect = Exception("AnalysisException: AccessDenied")
+        with pytest.raises(Exception, match="AccessDenied"):
+            update_catalog_table(fake_args, "orders", "s3://b/orders/", spark=mock_spark)
 
 
 class TestBuildSparkSession:
@@ -204,7 +155,7 @@ class TestBuildSparkSession:
         return mock_sc, mock_spark, mock_glue_ctx, mock_job
 
     def test_raises_when_delta_extension_is_missing(self):
-        mock_sc, mock_spark, mock_glue_ctx, mock_job = self._make_mocks(extensions="")
+        mock_sc, _, mock_glue_ctx, _ = self._make_mocks(extensions="")
         with patch("glue_jobs.utils.common.SparkContext") as mock_sc_cls:
             mock_sc_cls.getOrCreate.return_value = mock_sc
             with patch("glue_jobs.utils.common.GlueContext", return_value=mock_glue_ctx):

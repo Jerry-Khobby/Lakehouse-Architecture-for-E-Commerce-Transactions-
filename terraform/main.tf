@@ -2,6 +2,13 @@
 data "aws_caller_identity" "current" {}
 data "aws_region" "current" {}
 
+# Resolves the current caller to a stable IAM role/user ARN (strips the session
+# suffix from assumed-role ARNs). Required so Lake Formation accepts the ARN as
+# an admin principal — it rejects the sts:assumed-role form.
+data "aws_iam_session_context" "current" {
+  arn = data.aws_caller_identity.current.arn
+}
+
 locals {
   account_id  = data.aws_caller_identity.current.account_id
   region      = data.aws_region.current.name
@@ -14,9 +21,9 @@ locals {
   athena_bucket_name  = "${local.name_prefix}-athena-results-${local.account_id}"
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # S3 BUCKETS
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 # -- Access logs bucket (created first; other buckets reference it) ------------
 resource "aws_s3_bucket" "logs" {
@@ -234,12 +241,12 @@ resource "aws_s3_bucket_lifecycle_configuration" "athena_results" {
   }
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # S3 BUCKET POLICIES — deny any request not made over TLS
 # A baseline control: reject s3 actions when aws:SecureTransport is false so
 # data can never be read or written in plaintext over the wire. The condition
 # is a Deny, not a public grant, so it coexists with the public-access blocks.
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 locals {
   tls_only_buckets = {
@@ -267,9 +274,9 @@ resource "aws_s3_bucket_policy" "tls_only" {
   })
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # IAM
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 # -- Glue service role ---------------------------------------------------------
 resource "aws_iam_role" "glue_role" {
@@ -373,6 +380,22 @@ resource "aws_iam_role_policy" "glue_cloudwatch" {
     }]
   })
 }
+
+resource "aws_iam_role_policy" "glue_sns" {
+  name = "${local.name_prefix}-glue-sns-policy"
+  role = aws_iam_role.glue_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid      = "SNSPublishAlerts"
+      Effect   = "Allow"
+      Action   = ["sns:Publish"]
+      Resource = [aws_sns_topic.pipeline_alerts.arn]
+    }]
+  })
+}
+
 
 # -- Step Functions execution role ---------------------------------------------
 resource "aws_iam_role" "sfn_role" {
@@ -489,15 +512,16 @@ resource "aws_iam_role_policy" "sfn_glue" {
   })
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# GLUE DATA CATALOG
-# ─────────────────────────────────────────────────────────────────────────────
 
-# Switch Lake Formation to IAM-only mode for the whole account.
-# This means column/row access is governed by IAM policies alone —
-# no LF column filters can silently block Athena column resolution.
+# GLUE DATA CATALOG
+
+
+# The Terraform caller must be a Lake Formation admin to call GrantPermissions.
+# Without this, every aws_lakeformation_permissions resource fails with
+# AccessDeniedException regardless of IAM permissions.
 resource "aws_lakeformation_data_lake_settings" "account" {
-  admins = [data.aws_caller_identity.current.arn]
+  catalog_id = local.account_id
+  admins     = [data.aws_iam_session_context.current.issuer_arn]
 
   create_database_default_permissions {
     permissions = ["ALL"]
@@ -513,11 +537,108 @@ resource "aws_lakeformation_data_lake_settings" "account" {
 resource "aws_glue_catalog_database" "lakehouse" {
   name        = var.glue_database_name
   description = "E-commerce lakehouse Delta Lake tables — ${var.environment}"
+  catalog_id  = local.account_id
+
+  # Spark's CREATE TABLE ... USING DELTA resolves the parent database's
+  # LocationUri (new Path(database.locationUri)) before placing the table,
+  # even for external tables with an explicit LOCATION. Without this, the URI
+  # is the empty string and the Glue jobs' update_catalog_table() fails with:
+  #   IllegalArgumentException: Can not create a Path from an empty string
+  # Point it at the processed-data prefix where every Delta table already lives.
+  location_uri = "s3://${aws_s3_bucket.data.id}/${var.processed_data_prefix}"
 
   create_table_default_permission {
     permissions = ["ALL"]
-    principal { data_lake_principal_identifier = "IAM_ALLOWED_PRINCIPALS" }
+    principal {
+      data_lake_principal_identifier = "IAM_ALLOWED_PRINCIPALS"
+    }
   }
+}
+
+# Athena's query engine checks LF for Describe on the database before falling
+# through to IAM, even in IAM-passthrough mode. This explicit grant satisfies
+# that check without enabling full LF governance.
+resource "aws_lakeformation_permissions" "sfn_describe_database" {
+  principal   = aws_iam_role.sfn_role.arn
+  catalog_id  = local.account_id
+  permissions = ["DESCRIBE"]
+
+  database {
+    name       = aws_glue_catalog_database.lakehouse.name
+    catalog_id = local.account_id
+  }
+
+  depends_on = [aws_lakeformation_data_lake_settings.account]
+}
+
+
+resource "aws_lakeformation_permissions" "sfn_select_tables" {
+  principal   = aws_iam_role.sfn_role.arn
+  catalog_id  = local.account_id
+  permissions = ["SELECT", "DESCRIBE"]
+
+  table {
+    database_name = aws_glue_catalog_database.lakehouse.name
+    wildcard      = true # covers products, orders, order_items and any future tables
+    catalog_id    = local.account_id
+  }
+
+  depends_on = [aws_lakeformation_data_lake_settings.account]
+}
+
+resource "aws_lakeformation_permissions" "glue_role_database" {
+  principal   = aws_iam_role.glue_role.arn
+  catalog_id  = local.account_id
+  permissions = ["CREATE_TABLE", "DESCRIBE"]
+
+  database {
+    name       = aws_glue_catalog_database.lakehouse.name
+    catalog_id = local.account_id
+  }
+
+  depends_on = [aws_lakeformation_data_lake_settings.account]
+}
+
+resource "aws_lakeformation_permissions" "glue_role_alter_tables" {
+  principal   = aws_iam_role.glue_role.arn
+  catalog_id  = local.account_id
+  permissions = ["ALL"]
+
+  table {
+    database_name = aws_glue_catalog_database.lakehouse.name
+    wildcard      = true
+    catalog_id    = local.account_id
+  }
+
+  depends_on = [aws_lakeformation_data_lake_settings.account]
+}
+
+# ONE-TIME CATALOG CLEANUP
+# Deletes stale Glue catalog table entries left behind by previous broken runs
+# (wrong SerDe, LakeFormation contamination, missing path parameter).
+# update_catalog_table() in the Glue jobs will recreate them correctly on the
+# next pipeline run via glue.create_table().
+#
+# REMOVE THIS BLOCK after the pipeline has run successfully once and Athena
+# queries confirm the tables are clean. triggers_replace = [timestamp()] means
+# this runs on every terraform apply while it exists — that is intentional for
+# the cleanup run, but wasteful and noisy afterward.
+
+resource "terraform_data" "drop_stale_catalog_tables" {
+  triggers_replace = [timestamp()]
+
+  provisioner "local-exec" {
+    interpreter = ["PowerShell", "-Command"]
+    command     = <<-EOT
+      aws glue delete-table --database-name ${var.glue_database_name} --name products --region ${var.aws_region} 2>&1 | Out-Null
+      aws glue delete-table --database-name ${var.glue_database_name} --name orders --region ${var.aws_region} 2>&1 | Out-Null
+      aws glue delete-table --database-name ${var.glue_database_name} --name order_items --region ${var.aws_region} 2>&1 | Out-Null
+      Write-Host "Stale catalog tables cleared."
+      exit 0
+    EOT
+  }
+
+  depends_on = [aws_glue_catalog_database.lakehouse]
 }
 
 # -- Crawlers (one per dataset so failures are isolated) ----------------------
@@ -603,9 +724,9 @@ resource "aws_glue_crawler" "order_items" {
   schedule = var.crawler_schedule != "" ? var.crawler_schedule : null
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # ATHENA
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 resource "aws_athena_workgroup" "lakehouse" {
   name        = var.athena_workgroup_name
@@ -632,9 +753,9 @@ resource "aws_athena_workgroup" "lakehouse" {
   force_destroy = true
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # CLOUDWATCH LOG GROUPS
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 resource "aws_cloudwatch_log_group" "glue_jobs" {
   name              = "/aws-glue/jobs/${local.name_prefix}"
@@ -660,9 +781,9 @@ resource "aws_cloudwatch_log_resource_policy" "sfn" {
   })
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # SNS ALERT TOPIC (optional — only created if alert_email is set)
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 resource "aws_sns_topic" "pipeline_alerts" {
   name = "${local.name_prefix}-pipeline-alerts"
@@ -675,7 +796,7 @@ resource "aws_sns_topic_subscription" "email_alert" {
   endpoint  = var.alert_email
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # PIPELINE TRIGGER
 #
 # There is intentionally NO EventBridge S3 trigger. The three datasets form one
@@ -689,7 +810,7 @@ resource "aws_sns_topic_subscription" "email_alert" {
 # (states:StartExecution on this state machine + s3:PutObject on raw/) is
 # defined as aws_iam_policy.ingestion below; attach it to the developer or CI
 # principal that runs ingest.py.
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 resource "aws_iam_policy" "ingestion" {
   name        = "${local.name_prefix}-ingestion-policy"

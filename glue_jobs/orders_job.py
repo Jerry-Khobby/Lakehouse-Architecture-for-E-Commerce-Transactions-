@@ -352,17 +352,16 @@ def main():
         with monitor.stage("Delta Merge"):
             table_path = merge_into_delta(spark, valid_df, args)
 
-        with monitor.stage("Archive"):
-            archive_source_file(args)
-
         with monitor.stage("Catalog Update"):
             update_catalog_table(
                 args=args,
                 table_name=TABLE_NAME,
                 table_path=table_path,
-                schema=ORDERS_SCHEMA,
-                partition_cols=args["PARTITION_COLS_LIST"],
+                spark=spark,
             )
+
+        with monitor.stage("Archive"):
+            archive_source_file(args)
 
         monitor.log_summary()
 
