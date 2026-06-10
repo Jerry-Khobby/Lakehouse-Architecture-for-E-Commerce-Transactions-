@@ -64,7 +64,7 @@ def build_spark_session(job_name: str) -> tuple:
     active_extensions = spark.conf.get("spark.sql.extensions", "")
     if "DeltaSparkSessionExtension" not in active_extensions:
         raise RuntimeError(
-            "Delta Lake extensions not loaded. " "Check --conf spark.sql.extensions in Glue job default_arguments."
+            "Delta Lake extensions not loaded. Check --conf spark.sql.extensions in Glue job default_arguments."
         )
 
     job = Job(glue_ctx)
