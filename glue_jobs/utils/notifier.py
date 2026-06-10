@@ -26,10 +26,13 @@ class SnsNotifier:
             message=f"Stage '{stage_name}' started in job '{job_name}'.",
         )
 
-    def send_job_succeeded(self, job_name: str, stage_name: str, elapsed: float) -> None:
+    def send_job_succeeded(self, job_name: str, stage_name: str, elapsed: float, detail: str = "") -> None:
+        message = f"Stage '{stage_name}' completed in {elapsed:.1f}s."
+        if detail:
+            message = f"{message}\n{detail}"
         self._publish(
             subject=f"[{self._environment}] {job_name} — SUCCESS: {stage_name}",
-            message=f"Stage '{stage_name}' completed in {elapsed:.1f}s.",
+            message=message,
         )
 
     def send_job_failed(self, job_name: str, stage_name: str, error: Exception) -> None:
@@ -45,5 +48,7 @@ class SnsNotifier:
                 Subject=subject[:SNS_SUBJECT_MAX_LENGTH],
                 Message=message,
             )
-        except ClientError as exc:
-            logger.error("SNS publish failed — %s", exc)
+        except ClientError:
+            # Swallowed on purpose: a failed alert must never fail the pipeline.
+            # logger.exception records the traceback to CloudWatch for diagnosis.
+            logger.exception("SNS publish failed")

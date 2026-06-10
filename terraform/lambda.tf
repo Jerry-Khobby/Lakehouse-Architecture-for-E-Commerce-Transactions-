@@ -34,9 +34,18 @@ def handler(event, context):
         subject  = sns_msg.get("Subject", "Lakehouse ETL Notification")
         message  = sns_msg["Message"]
 
-        is_success = "SUCCESS" in subject.upper()
-        color      = "#36a64f" if is_success else "#d9534f"
-        icon       = ":white_check_mark:" if is_success else ":x:"
+        # Stages now publish a live feed: STARTED on entry, then SUCCESS or
+        # FAILED on exit. Colour/icon by state so a "STARTED" event is not
+        # mistaken for a failure (the old green-or-red split coloured it red).
+        upper = subject.upper()
+        if "FAILED" in upper or "ERROR" in upper:
+            color, icon = "#d9534f", ":x:"
+        elif "SUCCESS" in upper:
+            color, icon = "#36a64f", ":white_check_mark:"
+        elif "STARTED" in upper:
+            color, icon = "#3aa3e3", ":hourglass_flowing_sand:"
+        else:
+            color, icon = "#cccccc", ":information_source:"
 
         payload = {
             "attachments": [{

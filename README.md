@@ -24,7 +24,7 @@ provisioned with Terraform, and shipped through GitHub Actions.
    │ flagged/     │                          ▼                         ▼
    └──────────────┘                  Glue Data Catalog  ───────▶  Amazon Athena
                                                                   (downstream analytics)
-       failures ──▶ SNS topic ──▶ email + (optional) Slack Lambda
+   per-stage START/SUCCESS/FAILURE ──▶ SNS topic ──▶ email + (optional) Slack Lambda
 ```
 
 **Why a single ordered execution and not per-file S3 triggers?** The three
@@ -73,7 +73,7 @@ glue_jobs/
   products_job.py        orders_job.py        order_items_job.py
   utils/
     common.py            # Spark/Delta session, arg parsing, rejected writer, archiver, catalog
-    monitor.py           # per-stage timing + FAILURE-ONLY alerting
+    monitor.py           # per-stage timing + live START/SUCCESS/FAILURE alerting
     notifier.py          # SNS publisher
 ingestion/ingest.py      # uploads the batch + starts the Step Functions execution
 terraform/               # all infrastructure (S3, IAM, Glue, Step Functions, Athena, SNS, Lambda)

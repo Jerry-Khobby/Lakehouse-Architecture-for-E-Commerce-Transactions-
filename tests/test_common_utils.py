@@ -92,7 +92,6 @@ class TestWriteRejected:
         mock_parquet.assert_called_once()
 
 
-
 class TestArchiveSourceFile:
     def _make_clients(self):
         mock_s3 = MagicMock()

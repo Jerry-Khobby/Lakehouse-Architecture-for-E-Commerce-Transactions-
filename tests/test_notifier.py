@@ -36,6 +36,14 @@ def test_send_job_succeeded_includes_elapsed_seconds():
     assert "12.3s" in kwargs["Message"]
 
 
+def test_send_job_succeeded_appends_metrics_detail_when_present():
+    notifier, mock_sns = _make_notifier()
+    notifier.send_job_succeeded("job", "Validate", 12.3, "read=1000 | valid=1000 | rejected=0")
+    message = mock_sns.publish.call_args[1]["Message"]
+    assert "12.3s" in message
+    assert "read=1000 | valid=1000 | rejected=0" in message
+
+
 def test_send_job_failed_includes_error_text():
     notifier, mock_sns = _make_notifier()
     notifier.send_job_failed("job", "Merge", RuntimeError("kaboom"))

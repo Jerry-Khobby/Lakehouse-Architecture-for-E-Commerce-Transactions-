@@ -247,29 +247,36 @@ def main():
     )
 
     try:
-        with monitor.stage("Read"):
+        with monitor.stage("Read") as report:
             raw_df = read_source(spark, args)
+            rows_read = raw_df.count()
+            report.record(rows=rows_read)
 
-        with monitor.stage("Validate"):
+        with monitor.stage("Validate") as report:
             valid_df = validate(raw_df, args, job_run_id)
+            valid_count = valid_df.count()
+            report.record(read=rows_read, valid=valid_count, rejected=rows_read - valid_count)
 
-        if valid_df.count() == 0:
+        if valid_count == 0:
             logger.warning("All rows in %s were rejected. No Delta merge.", args["RAW_KEY"])
             return
 
-        with monitor.stage("Delta Merge"):
+        with monitor.stage("Delta Merge") as report:
             table_path = merge_into_delta(spark, valid_df, args)
+            report.record(merged=valid_count)
 
-        with monitor.stage("Catalog Update"):
+        with monitor.stage("Catalog Update") as report:
             update_catalog_table(
                 args=args,
                 table_name=TABLE_NAME,
                 table_path=table_path,
                 spark=spark,
             )
+            report.record(table=f"{args['DATABASE_NAME']}.{TABLE_NAME}")
 
-        with monitor.stage("Archive"):
+        with monitor.stage("Archive") as report:
             archive_source_file(args)
+            report.record(source=args["RAW_KEY"])
 
         monitor.log_summary()
 

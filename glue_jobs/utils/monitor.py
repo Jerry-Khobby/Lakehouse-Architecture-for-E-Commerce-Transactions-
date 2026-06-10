@@ -1,17 +1,22 @@
 """
-monitor.py — Stage timing + alerting helper for the Glue ETL jobs.
+monitor.py — Stage timing + live progress alerting for the Glue ETL jobs.
 
 PipelineMonitor wraps each pipeline stage in a context manager that logs
-start/success/failure to CloudWatch and records elapsed time.
+start/success/failure to CloudWatch, records elapsed time, and forwards a
+progress event to the optional notifier at *every* stage boundary.
 
-Notification policy — FAILURE ONLY:
-    The monitor forwards an event to the optional notifier *only when a stage
-    fails*. Per-stage start/success notifications are deliberately NOT sent:
-    a run touches five stages across three jobs, so notifying on every
-    start+success would publish ~30 SNS messages per healthy run and bury the
-    one message that matters (the failure) under alert fatigue. Pipeline-level
-    success is announced once by the Step Functions NotifySuccess state, so the
-    job-level channel is reserved for the precise failing stage + error.
+Notification policy — LIVE PER-STAGE FEED:
+    Each stage publishes a START event on entry and a SUCCESS or FAILURE event
+    on exit, so operators watch the run unfold in Slack instead of waiting for
+    the whole job to finish or break. The stage() context manager yields a
+    StageReport; the job records metrics on it (rows read, valid/rejected,
+    rows merged, registered table) and those are rendered into the SUCCESS
+    notification and the CloudWatch success line.
+
+    Pipeline-level success is still announced once by the Step Functions
+    NotifySuccess state — log_summary() writes the per-stage timing table to
+    CloudWatch only and never publishes, so the per-job feed and the
+    pipeline-level summary do not duplicate each other.
 """
 
 import time
@@ -25,6 +30,28 @@ SUMMARY_LINE = "═" * 56
 STAGE_WIDTH = 44
 
 
+class StageReport:
+    """
+    Mutable handle yielded by PipelineMonitor.stage().
+
+    The stage body calls record() to attach metrics that are rendered into the
+    SUCCESS notification and the CloudWatch success line. Keeping the metrics on
+    a yielded handle lets the job decide what is worth reporting without the
+    monitor having to know anything about the dataset.
+    """
+
+    def __init__(self):
+        self.metrics = {}
+
+    def record(self, **metrics) -> None:
+        """Attach one or more key=value metrics to this stage."""
+        self.metrics.update(metrics)
+
+    def summary(self) -> str:
+        """Render attached metrics as 'key=value | key=value' (empty if none)."""
+        return " | ".join(f"{key}={value}" for key, value in self.metrics.items())
+
+
 class PipelineMonitor:
 
     def __init__(self, job_name, notifier=None):
@@ -34,26 +61,49 @@ class PipelineMonitor:
 
     @contextmanager
     def stage(self, stage_name):
+        report = StageReport()
+
         logger.info("\n%s", SECTION_LINE)
         logger.info("  [START] %s | job=%s", stage_name, self._job_name)
         logger.info("%s", SECTION_LINE)
+        self._notify_started(stage_name)
 
         start_time = time.time()
         try:
-            yield
+            yield report
             elapsed = time.time() - start_time
             self._stage_timings[stage_name] = elapsed
-            logger.info("  [SUCCESS] %s — %.1fs | job=%s", stage_name, elapsed, self._job_name)
+
+            detail = report.summary()
+            suffix = f" | {detail}" if detail else ""
+            logger.info(
+                "  [SUCCESS] %s — %.1fs%s | job=%s",
+                stage_name,
+                elapsed,
+                suffix,
+                self._job_name,
+            )
+            self._notify_succeeded(stage_name, elapsed, detail)
 
         except Exception as error:
             elapsed = time.time() - start_time
             # logger.exception captures the full traceback in CloudWatch, which
             # the SNS alert (subject + message only) cannot carry.
             logger.exception("  [FAILED] %s — %.1fs | job=%s", stage_name, elapsed, self._job_name)
-
-            if self._notifier:
-                self._notifier.send_job_failed(self._job_name, stage_name, error)
+            self._notify_failed(stage_name, error)
             raise
+
+    def _notify_started(self, stage_name):
+        if self._notifier:
+            self._notifier.send_job_started(self._job_name, stage_name)
+
+    def _notify_succeeded(self, stage_name, elapsed, detail):
+        if self._notifier:
+            self._notifier.send_job_succeeded(self._job_name, stage_name, elapsed, detail)
+
+    def _notify_failed(self, stage_name, error):
+        if self._notifier:
+            self._notifier.send_job_failed(self._job_name, stage_name, error)
 
     def log_summary(self):
         logger.info("\n%s", SUMMARY_LINE)

@@ -27,7 +27,6 @@ from pyspark.sql import functions as F
 from pyspark.sql.types import StructType
 from delta.tables import DeltaTable
 
-
 # Logging
 
 
@@ -39,9 +38,7 @@ logging.basicConfig(
 logger = logging.getLogger("lakehouse.common")
 
 
-
 # Spark / Glue session
-
 
 
 def build_spark_session(job_name: str) -> tuple:
@@ -67,8 +64,7 @@ def build_spark_session(job_name: str) -> tuple:
     active_extensions = spark.conf.get("spark.sql.extensions", "")
     if "DeltaSparkSessionExtension" not in active_extensions:
         raise RuntimeError(
-            "Delta Lake extensions not loaded. "
-            "Check --conf spark.sql.extensions in Glue job default_arguments."
+            "Delta Lake extensions not loaded. " "Check --conf spark.sql.extensions in Glue job default_arguments."
         )
 
     job = Job(glue_ctx)
@@ -76,7 +72,6 @@ def build_spark_session(job_name: str) -> tuple:
 
     logger.info("Spark session ready. Delta extensions: %s", active_extensions)
     return sc, glue_ctx, spark, job
-
 
 
 # Argument parsing
@@ -109,14 +104,10 @@ def parse_args() -> dict:
     """
     raw = getResolvedOptions(sys.argv, REQUIRED_ARGS)
 
-    raw["MERGE_KEYS_LIST"] = [
-        k.strip() for k in raw["MERGE_KEYS"].split(",") if k.strip()
-    ]
-    raw["PARTITION_COLS_LIST"] = [
-        c.strip() for c in raw["PARTITION_COLS"].split(",") if c.strip()
-    ]
+    raw["MERGE_KEYS_LIST"] = [k.strip() for k in raw["MERGE_KEYS"].split(",") if k.strip()]
+    raw["PARTITION_COLS_LIST"] = [c.strip() for c in raw["PARTITION_COLS"].split(",") if c.strip()]
 
-    for key in ("DATA_BUCKET", "DATASET", "RAW_KEY", "DATABASE_NAME","PROCESSED_PREFIX"):
+    for key in ("DATA_BUCKET", "DATASET", "RAW_KEY", "DATABASE_NAME", "PROCESSED_PREFIX"):
         if not raw.get(key, "").strip():
             raise ValueError(f"Required job argument --{key} is empty or missing.")
 
@@ -129,9 +120,7 @@ def parse_args() -> dict:
     return raw
 
 
-
 # Rejected-record writer
-
 
 
 def write_rejected(
@@ -182,9 +171,7 @@ def write_rejected(
     return count
 
 
-
 # S3 file archiver
-
 
 
 def archive_source_file(args: dict) -> None:
@@ -206,10 +193,7 @@ def archive_source_file(args: dict) -> None:
 
     filename = source_key.split("/")[-1]
     run_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    dest_key = (
-        f"{args['ARCHIVED_PREFIX'].rstrip('/')}/{args['DATASET']}/"
-        f"{run_date}/{filename}"
-    )
+    dest_key = f"{args['ARCHIVED_PREFIX'].rstrip('/')}/{args['DATASET']}/" f"{run_date}/{filename}"
 
     try:
         s3.copy_object(
@@ -220,7 +204,10 @@ def archive_source_file(args: dict) -> None:
         )
         logger.info(
             "Archived: s3://%s/%s → s3://%s/%s",
-            bucket, source_key, bucket, dest_key,
+            bucket,
+            source_key,
+            bucket,
+            dest_key,
         )
 
         s3.delete_object(
@@ -232,13 +219,13 @@ def archive_source_file(args: dict) -> None:
 
     except ClientError:
         logger.exception(
-            "Archive step failed for s3://%s/%s", bucket, source_key,
+            "Archive step failed for s3://%s/%s",
+            bucket,
+            source_key,
         )
 
 
-
 # Delta table initialiser
-
 
 
 def ensure_delta_table(
@@ -268,7 +255,6 @@ def ensure_delta_table(
     writer.save(table_path)
 
     logger.info("Delta table initialised at %s", table_path)
-
 
 
 # Glue Data Catalog registrar — Spark SQL via DeltaCatalog
@@ -315,9 +301,7 @@ def update_catalog_table(
         raise
 
 
-
 # Helpers
-
 
 
 def s3_path(bucket: str, prefix: str, suffix: str = "") -> str:
