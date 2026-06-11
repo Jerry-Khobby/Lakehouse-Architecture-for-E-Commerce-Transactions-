@@ -219,6 +219,38 @@ JOIN ecom_lakehouse_db.products p ON oi.product_id = p.product_id
 GROUP BY p.product_name
 ORDER BY reorders DESC
 LIMIT 20;
+
+
+
+-- Order volume and revenue by date
+SELECT date,
+       COUNT(DISTINCT order_id)  AS total_orders,
+       SUM(total_amount)         AS total_revenue
+FROM ecom_lakehouse_db.orders
+GROUP BY date
+ORDER BY date;
+
+-- Top 10 most reordered products
+SELECT p.product_name,
+       p.department,
+       COUNT(*)                  AS reorder_count
+FROM ecom_lakehouse_db.order_items oi
+JOIN ecom_lakehouse_db.products p
+  ON oi.product_id = p.product_id
+WHERE oi.reordered = 1
+GROUP BY p.product_name, p.department
+ORDER BY reorder_count DESC
+LIMIT 10;
+
+-- Average order value by department
+SELECT p.department,
+       ROUND(AVG(o.total_amount), 2) AS avg_order_value,
+       COUNT(DISTINCT o.order_id)    AS order_count
+FROM ecom_lakehouse_db.orders o
+JOIN ecom_lakehouse_db.order_items oi ON o.order_id = oi.order_id
+JOIN ecom_lakehouse_db.products p     ON oi.product_id = p.product_id
+GROUP BY p.department
+ORDER BY avg_order_value DESC;
 ```
 
 ---
