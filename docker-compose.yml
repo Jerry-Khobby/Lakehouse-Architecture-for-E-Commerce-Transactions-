@@ -11,6 +11,7 @@ services:
       - -v
       - --tb=short
       - --cov=glue_jobs
+      - --cov=scripts
       - --cov-report=term-missing
       - --cov-fail-under=70
 
