@@ -45,6 +45,7 @@ def dirty_items(clean_items_result, clean_orders, valid_product_ids):
 
 # ── generate_clean_items ───────────────────────────────────────────────────────
 
+
 def test_generate_clean_items_reaches_target(clean_items):
     assert len(clean_items) == CLEAN_ITEM_TARGET
 
@@ -113,6 +114,7 @@ def test_generate_clean_items_timestamps_match_order(clean_items, clean_orders):
 
 # ── generate_dirty_items ───────────────────────────────────────────────────────
 
+
 def test_generate_dirty_items_returns_40_rows(dirty_items):
     assert len(dirty_items) == DIRTY_ITEM_COUNT
 
@@ -162,18 +164,28 @@ def test_generate_dirty_items_four_categories_are_mutually_exclusive(dirty_items
 
 _STUB_CLEAN_ITEM = [
     {
-        "id": 1, "order_id": "ord_11111", "user_id": "usr_001",
-        "days_since_prior_order": "3", "product_id": 5,
-        "add_to_cart_order": 1, "reordered": 0,
-        "order_timestamp": "2025-05-01 10:00:00", "date": "2025-05-01",
+        "id": 1,
+        "order_id": "ord_11111",
+        "user_id": "usr_001",
+        "days_since_prior_order": "3",
+        "product_id": 5,
+        "add_to_cart_order": 1,
+        "reordered": 0,
+        "order_timestamp": "2025-05-01 10:00:00",
+        "date": "2025-05-01",
     }
 ]
 _STUB_DIRTY_ITEM = [
     {
-        "id": "", "order_id": "ord_22222", "user_id": "usr_002",
-        "days_since_prior_order": "7", "product_id": 10,
-        "add_to_cart_order": 1, "reordered": 1,
-        "order_timestamp": "2025-05-02 11:00:00", "date": "2025-05-02",
+        "id": "",
+        "order_id": "ord_22222",
+        "user_id": "usr_002",
+        "days_since_prior_order": "7",
+        "product_id": 10,
+        "add_to_cart_order": 1,
+        "reordered": 1,
+        "order_timestamp": "2025-05-02 11:00:00",
+        "date": "2025-05-02",
     }
 ]
 
@@ -190,9 +202,15 @@ def test_write_order_items_header_is_correct(tmp_path, monkeypatch):
     with open(tmp_path / "order_items_may_2025.csv", newline="", encoding="utf-8") as f:
         header = next(csv.reader(f))
     assert header == [
-        "id", "order_id", "user_id", "days_since_prior_order",
-        "product_id", "add_to_cart_order", "reordered",
-        "order_timestamp", "date",
+        "id",
+        "order_id",
+        "user_id",
+        "days_since_prior_order",
+        "product_id",
+        "add_to_cart_order",
+        "reordered",
+        "order_timestamp",
+        "date",
     ]
 
 

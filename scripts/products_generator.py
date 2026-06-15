@@ -5,18 +5,23 @@ import random
 from constants import OUTPUT_DIR, DEPARTMENTS, PRODUCT_NAMES
 
 PRODUCT_SUFFIXES = [
-    "Original", "Classic", "Premium", "Value Pack",
-    "Large", "Small", "Organic", "Fresh", "Natural", "",
+    "Original",
+    "Classic",
+    "Premium",
+    "Value Pack",
+    "Large",
+    "Small",
+    "Organic",
+    "Fresh",
+    "Natural",
+    "",
 ]
 
 
 def generate_products():
     products = []
     pid = 1
-    dept_product_lists = [
-        (dept_id, dept_name, PRODUCT_NAMES[dept_name])
-        for dept_id, dept_name in DEPARTMENTS
-    ]
+    dept_product_lists = [(dept_id, dept_name, PRODUCT_NAMES[dept_name]) for dept_id, dept_name in DEPARTMENTS]
 
     while pid <= 1000:
         for dept_id, dept_name, name_pool in dept_product_lists:

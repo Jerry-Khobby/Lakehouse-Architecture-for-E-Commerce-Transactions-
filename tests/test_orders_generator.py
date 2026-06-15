@@ -29,6 +29,7 @@ def dirty_orders(clean_orders):
 
 # ── generate_clean_orders ──────────────────────────────────────────────────────
 
+
 def test_generate_clean_orders_returns_800_rows(clean_orders):
     assert len(clean_orders) == CLEAN_ORDER_COUNT
 
@@ -72,6 +73,7 @@ def test_generate_clean_orders_user_ids_are_from_valid_pool(clean_orders):
 
 # ── generate_dirty_orders ──────────────────────────────────────────────────────
 
+
 def test_generate_dirty_orders_returns_50_rows(dirty_orders):
     assert len(dirty_orders) == DIRTY_ORDER_COUNT
 
@@ -105,10 +107,7 @@ def test_generate_dirty_orders_future_timestamps_are_in_2027(dirty_orders):
 
 
 def test_generate_dirty_orders_has_10_date_mismatches(dirty_orders):
-    mismatch_count = sum(
-        1 for r in dirty_orders
-        if r["date"] != r["order_timestamp"][:10]
-    )
+    mismatch_count = sum(1 for r in dirty_orders if r["date"] != r["order_timestamp"][:10])
     assert mismatch_count == 10
 
 
@@ -122,7 +121,8 @@ def test_generate_dirty_orders_has_10_duplicate_order_ids(dirty_orders, clean_or
     clean_ids = {o["order_id"] for o in clean_orders}
     # duplicates are the rows that are not null, not negative, not future, not date-mismatch
     duplicates = [
-        r for r in dirty_orders
+        r
+        for r in dirty_orders
         if r["order_id"] != ""
         and float(r["total_amount"]) >= 0
         and not r["order_timestamp"].startswith("2027-")
@@ -136,7 +136,8 @@ def test_generate_dirty_orders_has_10_duplicate_order_ids(dirty_orders, clean_or
 def test_generate_dirty_orders_duplicate_amounts_differ_from_original(dirty_orders, clean_orders):
     clean_by_id = {o["order_id"]: float(o["total_amount"]) for o in clean_orders}
     duplicates = [
-        r for r in dirty_orders
+        r
+        for r in dirty_orders
         if r["order_id"] != ""
         and float(r["total_amount"]) >= 0
         and not r["order_timestamp"].startswith("2027-")
@@ -150,14 +151,22 @@ def test_generate_dirty_orders_duplicate_amounts_differ_from_original(dirty_orde
 
 _STUB_CLEAN = [
     {
-        "order_num": 1, "order_id": "ord_11111", "user_id": "usr_001",
-        "order_timestamp": "2025-05-01 10:00:00", "total_amount": "99.99", "date": "2025-05-01",
+        "order_num": 1,
+        "order_id": "ord_11111",
+        "user_id": "usr_001",
+        "order_timestamp": "2025-05-01 10:00:00",
+        "total_amount": "99.99",
+        "date": "2025-05-01",
     }
 ]
 _STUB_DIRTY = [
     {
-        "order_num": 801, "order_id": "", "user_id": "usr_002",
-        "order_timestamp": "2025-05-02 11:00:00", "total_amount": "50.00", "date": "2025-05-02",
+        "order_num": 801,
+        "order_id": "",
+        "user_id": "usr_002",
+        "order_timestamp": "2025-05-02 11:00:00",
+        "total_amount": "50.00",
+        "date": "2025-05-02",
     }
 ]
 
