@@ -244,5 +244,5 @@ MAY_END = datetime(2025, 5, 31, 23, 59, 59)
 FUTURE_START = datetime(2027, 1, 1, 0, 0, 0)
 FUTURE_END = datetime(2027, 12, 31, 23, 59, 59)
 
-TIMESTAMP_FMT = "%Y-%m-%d %H:%M:%S"
+TIMESTAMP_FMT = "%Y-%m-%dT%H:%M:%S"
 DATE_FMT = "%Y-%m-%d"
