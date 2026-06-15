@@ -39,3 +39,10 @@ def write_products(products):
         for product_id, dept_id, dept_name, product_name in products:
             writer.writerow([product_id, dept_id, dept_name, product_name])
     print(f"Written: {path}  ({len(products)} rows)")
+
+
+def load_product_ids(path: str) -> list:
+    """Read product_ids from an existing products CSV without overwriting it."""
+    with open(path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        return [int(row["product_id"]) for row in reader]
