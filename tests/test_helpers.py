@@ -25,12 +25,12 @@ def test_random_timestamp_returns_start_when_range_is_zero():
 
 def test_format_timestamp_produces_expected_string():
     dt = datetime(2025, 5, 15, 10, 30, 45)
-    assert format_timestamp(dt) == "2025-05-15 10:30:45"
+    assert format_timestamp(dt) == "2025-05-15T10:30:45"
 
 
 def test_format_timestamp_pads_single_digit_values():
     dt = datetime(2025, 5, 1, 9, 5, 3)
-    assert format_timestamp(dt) == "2025-05-01 09:05:03"
+    assert format_timestamp(dt) == "2025-05-01T09:05:03"
 
 
 def test_format_date_returns_date_only_string():

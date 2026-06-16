@@ -49,7 +49,7 @@ def test_future_range_end_is_after_start():
 
 def test_timestamp_fmt_renders_full_datetime():
     dt = datetime(2025, 5, 15, 10, 30, 45)
-    assert dt.strftime(constants.TIMESTAMP_FMT) == "2025-05-15 10:30:45"
+    assert dt.strftime(constants.TIMESTAMP_FMT) == "2025-05-15T10:30:45"
 
 
 def test_date_fmt_renders_date_only():
