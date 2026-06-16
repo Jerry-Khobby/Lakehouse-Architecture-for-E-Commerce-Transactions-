@@ -40,7 +40,7 @@ Developer workstation / GitHub Actions
 │                                                                 │
 │  RunProductsJob ──▶ RunOrdersJob ──▶ RunOrderItemsJob           │
 │         │                │                   │                  │
-│     (Glue job)       (Glue job)          (Glue job)            │
+│     (Glue job)       (Glue job)          (Glue job)             │
 │         │                │                   │                  │
 │         └────────────────┴───────────────────┘                  │
 │                          │                                      │
