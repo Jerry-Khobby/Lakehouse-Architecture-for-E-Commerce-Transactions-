@@ -797,24 +797,75 @@ resource "aws_sns_topic_subscription" "email_alert" {
 }
 
 
-# PIPELINE TRIGGER
+# PIPELINE TRIGGER — EventBridge + Aggregation Lambda
 #
-# There is intentionally NO EventBridge S3 trigger. The three datasets form one
-# relational batch (order_items references products and orders), so they are
-# ingested by a SINGLE Step Functions execution started explicitly by
-# ingestion/ingest.py after all three files have landed. Per-file S3 events
-# would fire three independent executions and race the referential-integrity
-# checks — see step_functions.tf for the full rationale.
+# S3 EventBridge notifications are enabled on the data bucket. Every CSV
+# uploaded to raw/ fires an "Object Created" event that EventBridge routes to
+# the aggregation Lambda (defined in lambda.tf).
 #
-# The least-privilege permission set the ingestion principal needs
-# (states:StartExecution on this state machine + s3:PutObject on raw/) is
-# defined as aws_iam_policy.ingestion below; attach it to the developer or CI
-# principal that runs ingest.py.
+# The aggregation Lambda records each file arrival in the DynamoDB batch tracker
+# table. Once all three files for a batch (products, orders, order_items) have
+# landed, it atomically claims the trigger slot and fires a SINGLE Step Functions
+# execution with the complete files map — matching the same input contract the
+# state machine has always expected.
+#
+# Why a Lambda and DynamoDB, not direct EventBridge → Step Functions?
+# A single S3 event carries only one file key. EventBridge's input transformer
+# cannot aggregate across three separate events. The aggregation Lambda holds
+# the state (which files have landed so far) that makes a single execution
+# possible — see docs/AWS_EventBridge.md for the full failure-mode analysis.
+#
+# The ingestion principal (ingest.py / CI runner) only needs s3:PutObject.
+# states:StartExecution is now the aggregation Lambda's responsibility.
 
+
+resource "aws_s3_bucket_notification" "data_bucket" {
+  bucket      = aws_s3_bucket.data.id
+  eventbridge = true
+}
+
+resource "aws_cloudwatch_event_rule" "raw_csv_upload" {
+  name        = "${local.name_prefix}-raw-csv-upload"
+  description = "Fires on every CSV upload to the raw/ prefix of the data bucket"
+
+  event_pattern = jsonencode({
+    source      = ["aws.s3"]
+    detail-type = ["Object Created"]
+    detail = {
+      bucket = { name = [aws_s3_bucket.data.id] }
+      object = {
+        key    = [{ prefix = "raw/" }]
+        suffix = [".csv"]
+      }
+    }
+  })
+}
+
+resource "aws_cloudwatch_event_target" "aggregation_lambda" {
+  rule      = aws_cloudwatch_event_rule.raw_csv_upload.name
+  target_id = "AggregationLambda"
+  arn       = aws_lambda_function.aggregation.arn
+}
+
+resource "aws_dynamodb_table" "batch_tracker" {
+  name         = "${local.name_prefix}-batch-tracker"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "batch_id"
+
+  attribute {
+    name = "batch_id"
+    type = "S"
+  }
+
+  ttl {
+    attribute_name = "expires_at"
+    enabled        = true
+  }
+}
 
 resource "aws_iam_policy" "ingestion" {
   name        = "${local.name_prefix}-ingestion-policy"
-  description = "Least-privilege permissions for the principal that runs ingest.py (upload raw files + start the ETL batch)."
+  description = "Least-privilege permissions for the principal that runs ingest.py — upload raw files only. EventBridge + aggregation Lambda handle the Step Functions trigger."
 
   policy = jsonencode({
     Version = "2012-10-17"
@@ -824,12 +875,6 @@ resource "aws_iam_policy" "ingestion" {
         Effect   = "Allow"
         Action   = ["s3:PutObject"]
         Resource = ["${aws_s3_bucket.data.arn}/${var.raw_data_prefix}*"]
-      },
-      {
-        Sid      = "StartEtlBatch"
-        Effect   = "Allow"
-        Action   = ["states:StartExecution"]
-        Resource = [aws_sfn_state_machine.etl_pipeline.arn]
       }
     ]
   })

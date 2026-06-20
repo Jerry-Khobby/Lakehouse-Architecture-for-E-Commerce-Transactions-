@@ -1,4 +1,116 @@
-# AWS Lambda — Slack Notification Forwarder
+# AWS Lambda — Functions in This Pipeline
+
+This pipeline uses two Lambda functions serving distinct purposes:
+
+1. **Aggregation Lambda** (`ecom-lakehouse-dev-aggregation`) — always active. Bridges S3 Object Created events to Step Functions by buffering file arrivals in DynamoDB until all three batch files are present, then firing a single execution.
+2. **Slack Notifier Lambda** (`ecom-lakehouse-dev-slack-notifier`) — optional. Converts SNS pipeline alert messages to Slack webhook payloads.
+
+---
+
+# Lambda 1 — Aggregation Trigger
+
+## Purpose
+
+EventBridge fires one event per S3 upload. The state machine requires all three file keys (`products`, `orders`, `order_items`) in a single execution input. The aggregation Lambda bridges this mismatch: it receives each individual S3 event, tracks which files have landed for the batch in DynamoDB, and fires exactly one `states:StartExecution` call once all three are confirmed present.
+
+## The Handler
+
+```python
+EXPECTED_DATASETS = {"products", "orders", "order_items"}
+
+def resolve_dataset_and_batch(key):
+    filename = key.split("/")[-1].replace(".csv", "")
+    match = re.match(r"^(products|orders|order_items)_(.+)$", filename)
+    if not match:
+        raise ValueError(f"Cannot parse dataset/batch from S3 key: {key}")
+    return match.group(1), match.group(2)
+
+def handler(event, context):
+    bucket = event["detail"]["bucket"]["name"]
+    key    = event["detail"]["object"]["key"]
+
+    dataset, batch = resolve_dataset_and_batch(key)
+
+    response = table.update_item(
+        Key={"batch_id": batch},
+        UpdateExpression="SET #ds = :key, expires_at = :ttl",
+        ExpressionAttributeNames={"#ds": dataset},
+        ExpressionAttributeValues={":key": key, ":ttl": int(time.time()) + TTL_HOURS * 3600},
+        ReturnValues="ALL_NEW",
+    )
+
+    landed = response["Attributes"]
+    if {k for k in landed if k in EXPECTED_DATASETS} < EXPECTED_DATASETS:
+        return   # waiting for remaining files
+
+    # Atomically claim the trigger slot — prevents duplicate executions
+    table.update_item(
+        Key={"batch_id": batch},
+        UpdateExpression="SET triggered = :t",
+        ConditionExpression="attribute_not_exists(triggered)",
+        ExpressionAttributeValues={":t": True},
+    )
+
+    sfn.start_execution(
+        stateMachineArn=STATE_MACHINE_ARN,
+        name=f"{batch}-{context.aws_request_id[:8]}",
+        input=json.dumps({"bucket": bucket, "batch": batch, "files": {
+            "products":    landed["products"],
+            "orders":      landed["orders"],
+            "order_items": landed["order_items"],
+        }}),
+    )
+```
+
+### `resolve_dataset_and_batch()`
+
+Parses a key like `raw/orders_apr_2025.csv` into `("orders", "apr_2025")` using the regex `^(products|orders|order_items)_(.+)$`. All three filenames carry the batch label, making this parse unambiguous for every file. A key that does not match (e.g. a non-pipeline CSV in `raw/`) raises `ValueError`, which Lambda logs and marks as a failed invocation — it routes to the SQS dead-letter queue after retries.
+
+### DynamoDB State
+
+The `batch_tracker` table holds one item per batch. Each invocation adds its dataset key using `UpdateExpression = SET #ds = :key`. The `ReturnValues="ALL_NEW"` response gives the full item after the update, so the Lambda can check in a single round-trip whether all three datasets are now present without a separate `GetItem` call.
+
+Items carry a TTL (`expires_at`) so a partial-upload batch that never completes is automatically cleaned up after `TTL_HOURS` (default 24 hours).
+
+### Atomic Trigger Guard
+
+After all three files are confirmed present, a conditional `update_item` sets `triggered = True` only if the attribute does not already exist:
+
+```python
+ConditionExpression="attribute_not_exists(triggered)"
+```
+
+If EventBridge delivers an event more than once (at-least-once delivery guarantee), two Lambda invocations may both see all three files present. Without this guard, both would call `start_execution` and fire duplicate pipeline runs. The conditional update ensures only the first invocation wins — the second catches `ConditionalCheckFailedException` and exits silently.
+
+## Configuration
+
+| Environment Variable | Source | Purpose |
+|---|---|---|
+| `BATCH_TRACKER_TABLE` | Terraform inject | DynamoDB table name |
+| `STATE_MACHINE_ARN` | Terraform inject | Step Functions ARN to invoke |
+| `TTL_HOURS` | Terraform inject (default `24`) | Partial-batch item lifetime |
+
+## Dead-Letter Queue
+
+Failed Lambda invocations (after Lambda's built-in retry) are delivered to `ecom-lakehouse-dev-aggregation-dlq`. Monitor this queue in the AWS console — a message here means a file landed in S3 but the Lambda could not process it. Common causes: DynamoDB throttling, Step Functions execution limit reached, or an unparseable S3 key.
+
+## IAM Role
+
+The aggregation Lambda role (`ecom-lakehouse-dev-lambda-aggregation-role`) holds three inline policies:
+
+- `BatchTrackerReadWrite` — `dynamodb:UpdateItem` and `dynamodb:GetItem` on the batch tracker table only.
+- `StartEtlExecution` — `states:StartExecution` on the ETL state machine only.
+- `SendToDLQ` — `sqs:SendMessage` on the aggregation DLQ only.
+
+Plus `AWSLambdaBasicExecutionRole` (managed) for CloudWatch Logs.
+
+## EventBridge Wiring
+
+EventBridge invokes the Lambda via a resource-based policy (`aws_lambda_permission.eventbridge_invoke_aggregation`), not an IAM role grant. The permission is scoped to the specific EventBridge rule ARN — no other EventBridge rule in the account can invoke this function.
+
+---
+
+# Lambda 2 — Slack Notification Forwarder
 
 ## Overview
 

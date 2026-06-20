@@ -85,8 +85,24 @@ output "sfn_role_arn" {
 
 # ── IAM (ingestion) ───────────────────────────────────────────────────────────
 output "ingestion_policy_arn" {
-  description = "Least-privilege managed policy for the principal that runs ingest.py — attach it to that developer/CI user or role"
+  description = "Least-privilege managed policy for the principal that runs ingest.py — s3:PutObject on raw/ only. EventBridge + aggregation Lambda handle the Step Functions trigger."
   value       = aws_iam_policy.ingestion.arn
+}
+
+# ── Aggregation Lambda + DynamoDB ─────────────────────────────────────────────
+output "aggregation_lambda_name" {
+  description = "Name of the batch aggregation Lambda that bridges S3 events to Step Functions"
+  value       = aws_lambda_function.aggregation.function_name
+}
+
+output "batch_tracker_table_name" {
+  description = "DynamoDB table that tracks which files have landed per batch"
+  value       = aws_dynamodb_table.batch_tracker.name
+}
+
+output "aggregation_dlq_url" {
+  description = "SQS dead-letter queue URL for failed aggregation Lambda invocations"
+  value       = aws_sqs_queue.aggregation_dlq.url
 }
 
 # ── Useful deploy commands ────────────────────────────────────────────────────
@@ -96,6 +112,6 @@ output "deploy_scripts_command" {
 }
 
 output "manual_sfn_trigger_command" {
-  description = "AWS CLI command to manually trigger the pipeline with the structured batch input (matches ingest.py)"
-  value       = "aws stepfunctions start-execution --state-machine-arn ${aws_sfn_state_machine.etl_pipeline.arn} --input '{\"bucket\":\"${aws_s3_bucket.data.id}\",\"batch\":\"manual_test\",\"files\":{\"products\":\"raw/products.csv\",\"orders\":\"raw/orders_apr_2025.csv\",\"order_items\":\"raw/order_items_apr_2025.csv\"}}'"
+  description = "AWS CLI command to manually trigger the pipeline — use only for testing (normal flow goes via EventBridge)"
+  value       = "aws stepfunctions start-execution --state-machine-arn ${aws_sfn_state_machine.etl_pipeline.arn} --input '{\"bucket\":\"${aws_s3_bucket.data.id}\",\"batch\":\"manual_test\",\"files\":{\"products\":\"raw/products_manual_test.csv\",\"orders\":\"raw/orders_manual_test.csv\",\"order_items\":\"raw/order_items_manual_test.csv\"}}'"
 }

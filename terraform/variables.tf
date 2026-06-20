@@ -148,3 +148,9 @@ variable "slack_webhook_url" {
   sensitive   = true
   default     = ""
 }
+
+variable "batch_tracker_ttl_hours" {
+  description = "Hours before a partial-upload DynamoDB record expires if a batch never fully lands"
+  type        = number
+  default     = 24
+}

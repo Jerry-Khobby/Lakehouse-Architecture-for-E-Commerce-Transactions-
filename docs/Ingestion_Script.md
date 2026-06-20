@@ -2,39 +2,32 @@
 
 ## Overview
 
-The ingestion layer consists of two scripts in the `ingestion/` directory: `ingest.py` is the entry point that defines the batch being processed and maps dataset names to local file paths, and `pipeline.py` provides the functions that perform the actual upload and Step Functions trigger. Together they upload all three source files to S3, collect the uploaded keys, and start exactly one Step Functions execution with the complete files map. This document covers the full flow from local file to Step Functions execution, the `Path.resolve()` fix for reliable path handling, how Terraform outputs are read to avoid hardcoding infrastructure ARNs, the Excel-to-CSV conversion step, and how `None` cell values from openpyxl are handled before writing.
+The ingestion layer consists of two scripts in the `ingestion/` directory: `ingest.py` is the entry point that defines the batch being processed and maps dataset names to local file paths, and `pipeline.py` provides the functions that perform the actual S3 upload. Together they upload all three source files to `raw/` in S3. From that point, the trigger is fully automatic: each upload fires an S3 Object Created event to EventBridge, which invokes the aggregation Lambda; once the Lambda confirms all three files for the batch have landed, it fires a single Step Functions execution with the complete files map.
+
+The ingestion scripts no longer call `states:StartExecution` directly — that responsibility belongs to the aggregation Lambda. The ingestion principal therefore needs only `s3:PutObject` on `raw/*`.
+
+This document covers the full upload flow, the `Path.resolve()` fix for reliable path handling, how Terraform outputs are read to avoid hardcoding infrastructure ARNs, the Excel-to-CSV conversion step, and how `None` cell values from openpyxl are handled before writing.
 
 ---
 
 ## `ingest.py` — The Entry Point
 
 ```python
-from pathlib import Path
-from ingestion.pipeline import run_ingestion
-
-BATCH    = "apr_2025"
-DATA_DIR = Path(__file__).resolve().parent / "data"
+BATCH = "apr_2025"
 
 DATASETS = {
-    "products": {
-        "local_path": DATA_DIR / "products.xlsx",
-        "s3_key":     f"raw/{BATCH}/products/products.csv",
-    },
-    "orders": {
-        "local_path": DATA_DIR / "orders.xlsx",
-        "s3_key":     f"raw/{BATCH}/orders/orders_{BATCH}.csv",
-    },
-    "order_items": {
-        "local_path": DATA_DIR / "order_items.xlsx",
-        "s3_key":     f"raw/{BATCH}/order_items/order_items_{BATCH}.csv",
-    },
+    "products":    {"file": "products.csv",              "key": "raw/products_apr_2025.csv"},
+    "orders":      {"file": "orders_apr_2025.xlsx",      "key": "raw/orders_apr_2025.csv"},
+    "order_items": {"file": "order_items_apr_2025.xlsx", "key": "raw/order_items_apr_2025.csv"},
 }
 
-if __name__ == "__main__":
-    run_ingestion(batch=BATCH, datasets=DATASETS)
+def main() -> None:
+    run_ingestion(BATCH, DATASETS)
 ```
 
-`ingest.py` is the only file that changes between monthly batch runs — `BATCH` is updated from `"apr_2025"` to `"may_2025"`, and all downstream paths and execution names update automatically via f-string interpolation. No other file in the pipeline needs to change for a new monthly batch.
+`ingest.py` is the only file that changes between monthly batch runs — `BATCH` and the three `key` values are updated for the new month. No other file in the pipeline needs to change for a new monthly batch.
+
+**Why all three filenames include the batch label:** The aggregation Lambda identifies which dataset and batch each S3 key belongs to by parsing the filename. All three keys must follow the pattern `<dataset>_<batch>.csv` (e.g. `products_apr_2025.csv`) so the Lambda's regex `^(products|orders|order_items)_(.+)$` resolves consistently. In the previous architecture, `products.csv` had no batch label because the Step Functions trigger was explicit — the Lambda's need for automatic batch correlation is what makes consistent naming a hard requirement.
 
 ---
 
@@ -76,7 +69,7 @@ The same command produces different file paths depending on where it is invoked.
 
 ## Terraform Output — No Hardcoded ARNs
 
-`pipeline.py` reads the Step Functions state machine ARN and the S3 bucket name from `terraform output` rather than hardcoding them:
+`pipeline.py` reads the S3 bucket name from `terraform output` rather than hardcoding it:
 
 ```python
 import subprocess
@@ -97,17 +90,18 @@ def _get_terraform_output(key: str) -> str:
 Called at the start of `run_ingestion()`:
 
 ```python
-state_machine_arn = _get_terraform_output("state_machine_arn")
-data_bucket       = _get_terraform_output("data_bucket_name")
+bucket = fetch_terraform_output("data_bucket_name")
 ```
+
+The state machine ARN is no longer read here — the aggregation Lambda reads it from its own environment variable (`STATE_MACHINE_ARN`), injected by Terraform at deploy time. The ingestion script only needs the bucket name to target the `put_object` calls.
 
 ### Why Not Environment Variables or a Config File
 
-**Environment variables:** Require the operator to set them before running the script. A missed `export STATE_MACHINE_ARN=...` produces a `KeyError` with no indication of what to set. The infrastructure ARN changes per environment (`dev`, `staging`, `prod`) and per Terraform workspace — tracking the correct value for each environment is an operational burden.
+**Environment variables:** Require the operator to set them before running the script. A missed `export DATA_BUCKET=...` produces a `KeyError` with no indication of what to set. The bucket name changes per environment (`dev`, `staging`, `prod`) and per Terraform workspace.
 
-**Hardcoded constants:** An ARN contains the AWS account ID and region. Hardcoding it makes the script non-portable across accounts and breaks immediately if the Terraform resource is recreated under a different name (which changes the ARN).
+**Hardcoded constants:** A bucket name contains a project prefix and AWS account ID. Hardcoding it makes the script non-portable across accounts and breaks if the bucket is recreated under a different name.
 
-**Terraform output:** The Terraform state is the authoritative source of truth for infrastructure ARNs. `terraform output` reads from the state file in the `terraform/` directory, which is always up to date after `terraform apply`. The script can be run immediately after any `terraform apply` without manual ARN updates. If the state machine is recreated, `terraform apply` updates the state file; the next `ingest.py` run picks up the new ARN automatically.
+**Terraform output:** The Terraform state is the authoritative source of truth for infrastructure resource names. `terraform output` reads from the state file in the `terraform/` directory, which is always up to date after `terraform apply`. The script can be run immediately after any `terraform apply` without manual updates.
 
 The `cwd` parameter in `subprocess.run()` uses the same `Path(__file__).resolve()` pattern to locate the `terraform/` directory reliably regardless of invocation path.
 
@@ -137,6 +131,7 @@ def _xlsx_to_csv(xlsx_path: Path) -> bytes:
 ```
 
 `openpyxl.load_workbook(read_only=True, data_only=True)`:
+
 - `read_only=True` — streams the worksheet row-by-row rather than loading the entire workbook into memory. For large worksheets (10,000+ rows), this avoids out-of-memory conditions on the ingestion machine.
 - `data_only=True` — reads cell values, not formulas. An Excel cell that contains `=SUM(A1:A10)` is read as its computed numeric value, not the formula string. Source data workbooks may contain calculated columns; `data_only=True` ensures the CSV contains the actual data values.
 
@@ -189,83 +184,49 @@ This is the same format fix that the May 2025 all-rejection bug was about. `_cle
 
 ---
 
-## `run_ingestion()` — Upload All Three, Then Trigger Once
+## `run_ingestion()` — Upload All Three Files
 
 ```python
 def run_ingestion(batch: str, datasets: dict) -> None:
-    state_machine_arn = _get_terraform_output("state_machine_arn")
-    data_bucket       = _get_terraform_output("data_bucket_name")
+    bucket = fetch_terraform_output("data_bucket_name")
 
-    s3_client  = boto3.client("s3")
-    sfn_client = boto3.client("stepfunctions")
+    s3_client = boto3.client("s3")
+    for dataset, spec in datasets.items():
+        try:
+            upload_dataset(s3_client, bucket, spec["file"], spec["key"])
+        except (ClientError, OSError) as error:
+            print(f"  FAILED    {spec['key']}: {error}")
+            sys.exit(1)
 
-    uploaded_files = {}
-    for dataset_name, config in datasets.items():
-        csv_bytes = _xlsx_to_csv(config["local_path"])
-        s3_key    = config["s3_key"]
-
-        s3_client.put_object(
-            Bucket=data_bucket,
-            Key=s3_key,
-            Body=csv_bytes,
-            ContentType="text/csv",
-        )
-        uploaded_files[dataset_name] = s3_key
-        logger.info("Uploaded %s → s3://%s/%s", dataset_name, data_bucket, s3_key)
-
-    start_etl_batch(
-        sfn_client=sfn_client,
-        state_machine_arn=state_machine_arn,
-        bucket=data_bucket,
-        batch=batch,
-        files=uploaded_files,
-    )
+    print(f"\nAll {len(datasets)} files uploaded.")
+    print("EventBridge will detect the uploads and fire Step Functions once all three files are present.")
 ```
 
-All three files are uploaded **before** `start_etl_batch()` is called. This is the critical design decision that prevents the EventBridge race condition documented in [AWS_EventBridge.md](AWS_EventBridge.md). The Step Functions execution does not start until the `for` loop completes — until then, all three CSVs are available at their S3 keys. The Glue jobs will find all three files immediately when they read `$.files` from the execution input.
+`run_ingestion()` uploads all three files then exits. It does **not** call `states:StartExecution`. The trigger is automatic:
 
-If any `put_object` call raises (network error, permissions error, bucket does not exist), the exception propagates out of `run_ingestion()` before `start_etl_batch()` is called. No Step Functions execution is started. The partial upload (some files in `raw/`, some not) is harmless — the next `run_ingestion()` call re-uploads all three files (overwriting any partial uploads on the same keys) and then triggers the execution.
+1. Each `s3.put_object` call completes → S3 fires an `Object Created` event to EventBridge.
+2. EventBridge routes the event to the aggregation Lambda.
+3. The Lambda records the landed file in DynamoDB and checks the count.
+4. When the third file lands, the Lambda fires a single `states:StartExecution` with the complete `files` map.
+
+If any `put_object` call raises (network error, permissions error, bucket does not exist), the script prints the error and exits. No Step Functions execution is started. The partial upload is harmless — the DynamoDB record for the batch has a 24-hour TTL, and the next `run_ingestion()` call overwrites the partial S3 keys. If the Lambda was invoked by the partial upload events, it simply recorded fewer than 3 files and waited — no execution was fired.
 
 ---
 
-## `start_etl_batch()` — The Execution Trigger
+## `start_etl_batch()` — Manual Trigger Utility
+
+`start_etl_batch()` and `build_execution_name()` remain in `pipeline.py` but are no longer called by `run_ingestion()`. They are retained as a manual override for emergency re-triggering — for example, if the aggregation Lambda failed to fire after all three files landed and the DynamoDB item has already expired.
 
 ```python
-def start_etl_batch(
-    sfn_client,
-    state_machine_arn: str,
-    bucket: str,
-    batch: str,
-    files: dict,
-) -> str:
-    execution_name = _build_execution_name(batch)
-    execution_input = json.dumps({
-        "bucket": bucket,
-        "batch":  batch,
-        "files":  files,
-    })
-
+def start_etl_batch(sfn_client, state_machine_arn: str, bucket: str, batch: str, files: dict) -> str:
+    execution_input = {"bucket": bucket, "batch": batch, "files": files}
+    execution_name  = build_execution_name(batch)
     response = sfn_client.start_execution(
         stateMachineArn=state_machine_arn,
         name=execution_name,
-        input=execution_input,
+        input=json.dumps(execution_input),
     )
-    logger.info("Started execution: %s", response["executionArn"])
     return response["executionArn"]
 ```
 
-### `_build_execution_name()`
-
-```python
-def _build_execution_name(batch: str) -> str:
-    timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
-    raw_name  = f"{batch}-{timestamp}"
-    safe_name = re.sub(r"[^0-9A-Za-z_-]", "-", raw_name)
-    return safe_name[:80]
-```
-
-Step Functions execution names must match `[a-zA-Z0-9_-]` and be at most 80 characters. `batch = "apr_2025"` and `timestamp = "20250430T092211"` produce `"apr_2025-20250430T092211"` — already within the character set and length limit.
-
-The `re.sub()` replaces any non-allowed character with `-`. This handles batch identifiers that contain spaces, dots, or other punctuation. The `[:80]` truncates at 80 characters regardless. The timestamp suffix ensures uniqueness — the same batch identifier (`apr_2025`) can be run again with a different execution name if a re-run is needed after a failure.
-
-Step Functions enforces execution name uniqueness within an account per state machine — if `start_execution()` is called with the same name as an existing execution (running or completed within the last 90 days), it raises `ExecutionAlreadyExists`. The timestamp suffix prevents this.
+To use it manually, the caller needs AWS credentials with `states:StartExecution` on the state machine ARN — the standard ingestion policy no longer grants this, so a separate role or elevated credentials are required for manual re-triggering. The `manual_sfn_trigger_command` Terraform output provides the equivalent AWS CLI command for one-off use.

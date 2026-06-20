@@ -2,7 +2,15 @@
 pipeline.py — Shared ingestion utilities used by every batch entry point.
 
 Each entry point (ingest.py, ingest_may_2025.py, …) defines its own BATCH
-label and DATASETS map, then delegates execution to run_ingestion().
+label and DATASETS map, then delegates file uploads to run_ingestion().
+
+Trigger flow (automatic):
+  run_ingestion() uploads all three CSV files to S3 raw/.
+  S3 fires Object Created events → EventBridge → aggregation Lambda.
+  Once all three files for the batch are present, the Lambda starts a single
+  Step Functions execution with the complete files map.
+
+start_etl_batch() is retained for manual or emergency triggering only.
 """
 
 import csv
@@ -95,30 +103,22 @@ def start_etl_batch(sfn_client, state_machine_arn: str, bucket: str, batch: str,
 
 
 def run_ingestion(batch: str, datasets: dict) -> None:
-    """Upload all dataset files then fire a single Step Functions execution."""
+    """Upload all dataset files to S3 raw/. EventBridge triggers Step Functions automatically."""
     print("Reading Terraform outputs ...")
     bucket = fetch_terraform_output("data_bucket_name")
-    state_machine_arn = fetch_terraform_output("sfn_state_machine_arn")
 
     print(f"Target bucket : {bucket}")
-    print(f"State machine : {state_machine_arn}")
     print(f"Batch         : {batch}")
     print(f"Datasets      : {len(datasets)}\n")
 
     s3_client = boto3.client("s3")
-    files = {}
     for dataset, spec in datasets.items():
         try:
             upload_dataset(s3_client, bucket, spec["file"], spec["key"])
-            files[dataset] = spec["key"]
         except (ClientError, OSError) as error:
             print(f"  FAILED    {spec['key']}: {error}")
             sys.exit(1)
 
-    print(f"\nAll {len(datasets)} files uploaded. Starting the ETL batch ...")
-    sfn_client = boto3.client("stepfunctions")
-    execution_arn = start_etl_batch(sfn_client, state_machine_arn, bucket, batch, files)
-
-    print(f"Started execution:\n  {execution_arn}")
-    print("Track progress with:")
-    print(f"  aws stepfunctions describe-execution --execution-arn {execution_arn}")
+    print(f"\nAll {len(datasets)} files uploaded.")
+    print("EventBridge will detect the uploads and fire Step Functions once all three files are present.")
+    print("Track progress: AWS Console → Step Functions → ecom-lakehouse-dev-etl-pipeline")

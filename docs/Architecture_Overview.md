@@ -31,8 +31,27 @@ The specific trade-off accepted here: query performance for ad-hoc workloads is 
 ```
 Developer workstation / GitHub Actions
           │
-          │  1. ingest.py uploads 3 CSVs to raw/
-          │  2. Calls states:StartExecution
+          │  ingest.py uploads 3 CSVs to raw/
+          ▼
+   Amazon S3 — raw/ prefix
+          │
+          │  S3 Object Created events (one per file)
+          ▼
+   Amazon EventBridge
+   rule: raw/*.csv uploads on data bucket
+          │
+          │  invokes on every CSV landing
+          ▼
+   Aggregation Lambda (ecom-lakehouse-dev-aggregation)
+          │  records each file in DynamoDB batch tracker
+          │  waits until all 3 files for the batch are present
+          │  on 3/3: calls states:StartExecution once
+   ┌──────┴──────┐
+   │  DynamoDB   │  SQS DLQ (failed invocations)
+   │batch tracker│
+   └─────────────┘
+          │
+          │  single StartExecution with complete files map
           ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                    AWS Step Functions                           │
@@ -116,6 +135,18 @@ Delta Lake provides three capabilities this architecture depends on:
 
 **First-run initialisation.** `ensure_delta_table()` in `common.py` checks `DeltaTable.isDeltaTable(spark, path)`. On the very first run it writes an empty DataFrame to seed the transaction log, making the subsequent MERGE behave correctly. This is idempotent — every subsequent run skips the init with no I/O cost.
 
+### EventBridge + Aggregation Lambda
+
+S3 EventBridge notifications are enabled on the data bucket. Every CSV uploaded to `raw/` fires an `Object Created` event that EventBridge routes to the aggregation Lambda via the `raw_csv_upload` rule (filtered to the `raw/` prefix and `.csv` suffix, so Glue writes to `lakehouse-dwh/` and `archived/` do not trigger it).
+
+The aggregation Lambda cannot simply forward each event to Step Functions — a single S3 event carries only one file key, but the state machine requires all three file keys in its input. The Lambda solves this by using a DynamoDB table (`ecom-lakehouse-dev-batch-tracker`) as shared memory across the three independent Lambda invocations triggered by the three file uploads.
+
+Each invocation parses the batch label and dataset name from the S3 key (e.g. `raw/orders_apr_2025.csv` → dataset `orders`, batch `apr_2025`), writes the key into the DynamoDB item for that batch, then checks whether all three datasets (`products`, `orders`, `order_items`) are present. If not, it exits silently. When the third file lands and all three are confirmed present, the Lambda atomically marks the batch as triggered (using a DynamoDB conditional expression to prevent duplicate executions if EventBridge delivers an event more than once) and calls `states:StartExecution` with the complete files map.
+
+An SQS dead-letter queue (`ecom-lakehouse-dev-aggregation-dlq`) captures Lambda invocations that fail after all retries — no event is silently lost. DynamoDB items carry a 24-hour TTL so partial-upload state from an abandoned batch is automatically cleaned up.
+
+All three filenames carry the batch label (`products_apr_2025.csv`, `orders_apr_2025.csv`, `order_items_apr_2025.csv`), making the batch-label parse consistent and unambiguous across all three events.
+
 ### AWS Step Functions
 
 The state machine type is `STANDARD` (not EXPRESS), which provides full execution history, audit logging, and exactly-once execution semantics — important for a pipeline where duplicate commits must be prevented.
@@ -141,13 +172,13 @@ Every Glue task has:
 - `Retry`: two retries with exponential backoff on `Glue.AWSGlueException`, `States.TaskFailed`, and `States.Timeout`.
 - `Catch`: all errors (`States.ALL`) route to `NotifyFailure`, which publishes to SNS before transitioning to the terminal `PipelineFailed` state.
 
-The execution input is a structured JSON object passed through every state unchanged:
+The execution input is a structured JSON object assembled by the aggregation Lambda and passed through every state unchanged:
 ```json
 {
   "bucket": "ecom-lakehouse-dev-data-<account>",
   "batch": "apr_2025",
   "files": {
-    "products":    "raw/products.csv",
+    "products":    "raw/products_apr_2025.csv",
     "orders":      "raw/orders_apr_2025.csv",
     "order_items": "raw/order_items_apr_2025.csv"
   }
@@ -204,7 +235,7 @@ All AWS resources are defined in Terraform under `terraform/`. The state is stor
 
 - **Resource naming**: every resource name is prefixed `${project_name}-${environment}` (e.g. `ecom-lakehouse-dev`) and suffixed with the AWS account ID where global uniqueness is required (S3 bucket names).
 - **S3 prefix objects**: `aws_s3_object` resources for each prefix (`raw/`, `lakehouse-dwh/`, etc.) ensure the logical folders exist before any Glue job runs.
-- **Least-privilege ingestion policy**: `aws_iam_policy.ingestion` grants only `s3:PutObject` on `raw/*` and `states:StartExecution` on the state machine. This is the policy to attach to the developer or CI IAM principal that runs `ingest.py`.
+- **Least-privilege ingestion policy**: `aws_iam_policy.ingestion` grants only `s3:PutObject` on `raw/*`. The `states:StartExecution` permission has moved to the aggregation Lambda's IAM role — the ingestion principal no longer needs it. Attach this policy to the developer or CI IAM principal that runs `ingest.py`.
 - **Lake Formation admin**: `aws_lakeformation_data_lake_settings` sets the caller's IAM principal as the LF admin so `aws_lakeformation_permissions` resources apply without `AccessDeniedException`.
 
 ### CI/CD — GitHub Actions
