@@ -2,7 +2,7 @@
 
 ## Overview
 
-AWS Identity and Access Management (IAM) controls which AWS principal can call which AWS API on which resource. This pipeline has four IAM principals — the Glue job role, the Step Functions execution role, the Lambda execution role, and the ingestion principal — each with a carefully scoped set of permissions. There is no EventBridge role because this project does not use EventBridge for triggering (the ingestion policy covers the trigger mechanism directly). This document explains every role and policy, what each permission statement does, and the reasoning behind each scoping decision.
+AWS Identity and Access Management (IAM) controls which AWS principal can call which AWS API on which resource. This pipeline has five IAM principals — the Glue job role, the Step Functions execution role, the aggregation Lambda role, the Slack notifier Lambda role, and the ingestion principal — each with a carefully scoped set of permissions. EventBridge invokes the aggregation Lambda via a resource-based policy (no separate IAM role for EventBridge), and the aggregation Lambda holds `states:StartExecution` — the ingestion principal no longer needs that permission. This document explains every role and policy, what each permission statement does, and the reasoning behind each scoping decision.
 
 ---
 
@@ -272,7 +272,87 @@ This is not a misconfiguration or an oversight. The AWS documentation for Step F
 
 ---
 
-## Role 3 — Lambda Execution Role
+## Role 3 — Aggregation Lambda Role
+
+```hcl
+resource "aws_iam_role" "lambda_aggregation_role" {
+  name = "${local.name_prefix}-lambda-aggregation-role"
+
+  assume_role_policy = jsonencode({
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "lambda.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
+```
+
+Only `lambda.amazonaws.com` can assume this role. EventBridge does not assume it — EventBridge invokes the function directly via a resource-based permission (`aws_lambda_permission.eventbridge_invoke_aggregation`), which is separate from IAM roles.
+
+### Managed: `AWSLambdaBasicExecutionRole`
+
+```hcl
+resource "aws_iam_role_policy_attachment" "aggregation_basic_execution" {
+  role       = aws_iam_role.lambda_aggregation_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+```
+
+Grants `logs:CreateLogGroup`, `logs:CreateLogStream`, and `logs:PutLogEvents` on the Lambda's log group. Required for any Lambda function.
+
+### Inline: `BatchTrackerReadWrite`
+
+```hcl
+Action   = ["dynamodb:UpdateItem", "dynamodb:GetItem"]
+Resource = [aws_dynamodb_table.batch_tracker.arn]
+```
+
+**`UpdateItem`** — used on every invocation to record the landed file key for the batch (`SET #ds = :key`) and to set the TTL (`expires_at`). Also used to atomically claim the trigger slot (`SET triggered = :t` with `ConditionExpression = attribute_not_exists(triggered)`).
+
+**`dynamodb:GetItem`** — kept for diagnostic use (e.g. manually checking whether a batch item exists). The handler itself uses `ReturnValues="ALL_NEW"` on the `UpdateItem` call to read back the full item in a single round-trip, so `GetItem` is not needed in the happy path.
+
+Scoped to the `batch_tracker` table ARN only. The Lambda cannot read or write any other DynamoDB table in the account.
+
+### Inline: `StartEtlExecution`
+
+```hcl
+Action   = ["states:StartExecution"]
+Resource = [aws_sfn_state_machine.etl_pipeline.arn]
+```
+
+Called once per completed batch to fire the Step Functions execution. Scoped to the specific state machine ARN — the Lambda cannot start any other state machine in the account.
+
+This permission moved from the ingestion policy (where the developer/CI principal previously held it) to the Lambda role. The ingestion principal now only needs `s3:PutObject`.
+
+### Inline: `SendToDLQ`
+
+```hcl
+Action   = ["sqs:SendMessage"]
+Resource = [aws_sqs_queue.aggregation_dlq.arn]
+```
+
+Lambda's dead-letter queue integration calls `sqs:SendMessage` on the DLQ when a function invocation fails after all retries. Without this permission, the DLQ delivery itself fails and the failed event is silently dropped. Scoped to the aggregation DLQ ARN only.
+
+### EventBridge Invoke Permission (resource-based, not IAM)
+
+```hcl
+resource "aws_lambda_permission" "eventbridge_invoke_aggregation" {
+  statement_id  = "AllowEventBridgeInvoke"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.aggregation.function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.raw_csv_upload.arn
+}
+```
+
+This is a Lambda resource-based policy, not an IAM role attachment. It grants EventBridge the right to call `lambda:InvokeFunction` on this specific function. The `source_arn` scope means only the `raw_csv_upload` EventBridge rule can trigger it — no other EventBridge rule in the account can invoke this function, even if it targets the same function ARN.
+
+EventBridge does not need an IAM role here because it invokes the Lambda directly using the resource-based policy on the Lambda. IAM roles are required for EventBridge only when it targets services that do not support resource-based policies (e.g. Step Functions, Kinesis).
+
+---
+
+## Role 4 — Slack Notifier Lambda Role
 
 ```hcl
 resource "aws_iam_role" "lambda_slack_role" {
@@ -292,11 +372,11 @@ resource "aws_iam_role_policy_attachment" "lambda_basic_execution" {
 
 The Slack notifier Lambda makes no AWS API calls — it only reads an environment variable and makes an outbound HTTPS call to Slack. The only IAM permission it needs is the ability to write its logs to CloudWatch, which `AWSLambdaBasicExecutionRole` provides (`logs:CreateLogGroup`, `logs:CreateLogStream`, `logs:PutLogEvents`).
 
-No S3, no SNS, no Glue, no Step Functions permissions. This is the minimal possible Lambda role.
+No S3, no SNS, no Glue, no Step Functions, no DynamoDB permissions. This is the minimal possible Lambda role.
 
 ---
 
-## The Ingestion Policy — No EventBridge Role
+## The Ingestion Policy
 
 ```hcl
 resource "aws_iam_policy" "ingestion" {
@@ -305,11 +385,6 @@ resource "aws_iam_policy" "ingestion" {
       Sid      = "UploadRawFiles"
       Action   = ["s3:PutObject"]
       Resource = ["${data_bucket_arn}/raw/*"]
-    },
-    {
-      Sid      = "StartEtlBatch"
-      Action   = ["states:StartExecution"]
-      Resource = [state_machine_arn]
     }
   ]
 }
@@ -317,27 +392,27 @@ resource "aws_iam_policy" "ingestion" {
 
 This policy is attached to the developer or CI principal that runs `ingest.py`. It is not a role — it is a standalone policy that gets attached to whatever IAM identity the operator uses.
 
-**Why no EventBridge role:** In an EventBridge-triggered design, an EventBridge rule would need an IAM role with `states:StartExecution` to invoke Step Functions. This project does not use EventBridge — `ingest.py` calls `states:StartExecution` directly using the operator's credentials. The ingestion policy is what provides that permission.
-
 **`UploadRawFiles`:** Scoped to `raw/*` within the data bucket only. The ingestion principal cannot write to `lakehouse-dwh/`, `rejected/`, `archived/`, or any other prefix. A credential leak cannot corrupt processed data.
 
-**`StartEtlBatch`:** Scoped to the specific state machine ARN. The ingestion principal cannot start any other Step Functions state machine in the account.
+**`states:StartExecution` is no longer here.** In the previous architecture, the ingestion script called `states:StartExecution` directly, so the ingestion policy included that permission. In the current architecture, `ingest.py` only uploads files to S3 — the aggregation Lambda (Role 3) holds `states:StartExecution` and fires Step Functions once all three files are confirmed present. Removing `states:StartExecution` from the ingestion policy reduces the blast radius of a leaked ingestion credential: a stolen key can only write CSV files to `raw/`, not launch pipeline executions.
 
-**What the ingestion principal cannot do:** `s3:GetObject` (cannot read existing data), `s3:DeleteObject` (cannot delete files), `glue:StartJobRun` (cannot trigger Glue jobs directly), `states:StopExecution` (cannot cancel running pipelines), `states:DescribeExecution` (cannot inspect execution state). Attaching this policy to a CI runner or developer workstation gives it exactly the rights needed to ingest one batch and nothing more.
+**What the ingestion principal cannot do:** `s3:GetObject` (cannot read existing data), `s3:DeleteObject` (cannot delete files), `glue:StartJobRun` (cannot trigger Glue jobs directly), `states:StartExecution` (cannot start Step Functions directly), `states:StopExecution` (cannot cancel running pipelines). Attaching this policy to a CI runner or developer workstation gives it exactly the rights needed to upload one batch and nothing more.
 
 ---
 
 ## Permission Interaction Summary
 
-| Action | Glue Role | SFN Role | Lambda Role | Ingestion Policy |
-|---|---|---|---|---|
-| Read `raw/` CSV | ✅ | ❌ | ❌ | ❌ |
-| Write `lakehouse-dwh/` | ✅ | ❌ | ❌ | ❌ |
-| Write `rejected/` | ✅ | ❌ | ❌ | ❌ |
-| Upload `raw/` file | ❌ | ❌ | ❌ | ✅ |
-| Start Step Functions | ❌ | ❌ | ❌ | ✅ |
-| Start Glue job | ❌ | ✅ | ❌ | ❌ |
-| Run Athena query | ❌ | ✅ | ❌ | ❌ |
-| Publish to SNS | ✅ | ✅ | ❌ | ❌ |
-| Register catalog table | ✅ | ❌ | ❌ | ❌ |
-| Write CloudWatch logs | ✅ | ✅ | ✅ | ❌ |
+| Action | Glue Role | SFN Role | Aggregation Lambda | Slack Lambda | Ingestion Policy |
+| --- | --- | --- | --- | --- | --- |
+| Read `raw/` CSV | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Write `lakehouse-dwh/` | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Write `rejected/` | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Upload `raw/` file | ❌ | ❌ | ❌ | ❌ | ✅ |
+| Start Step Functions | ❌ | ❌ | ✅ | ❌ | ❌ |
+| Start Glue job | ❌ | ✅ | ❌ | ❌ | ❌ |
+| Run Athena query | ❌ | ✅ | ❌ | ❌ | ❌ |
+| Publish to SNS | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Register catalog table | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Read/write DynamoDB batch tracker | ❌ | ❌ | ✅ | ❌ | ❌ |
+| Send to aggregation DLQ | ❌ | ❌ | ✅ | ❌ | ❌ |
+| Write CloudWatch logs | ✅ | ✅ | ✅ | ✅ | ❌ |

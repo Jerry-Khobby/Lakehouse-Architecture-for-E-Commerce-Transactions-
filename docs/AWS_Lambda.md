@@ -7,7 +7,7 @@ This pipeline uses two Lambda functions serving distinct purposes:
 
 ---
 
-# Lambda 1 — Aggregation Trigger
+## Lambda 1 — Aggregation Trigger
 
 ## Purpose
 
@@ -85,7 +85,7 @@ If EventBridge delivers an event more than once (at-least-once delivery guarante
 ## Configuration
 
 | Environment Variable | Source | Purpose |
-|---|---|---|
+| --- | --- | --- |
 | `BATCH_TRACKER_TABLE` | Terraform inject | DynamoDB table name |
 | `STATE_MACHINE_ARN` | Terraform inject | Step Functions ARN to invoke |
 | `TTL_HOURS` | Terraform inject (default `24`) | Partial-batch item lifetime |
@@ -110,7 +110,7 @@ EventBridge invokes the Lambda via a resource-based policy (`aws_lambda_permissi
 
 ---
 
-# Lambda 2 — Slack Notification Forwarder
+## Lambda 2 — Slack Notification Forwarder
 
 ## Overview
 
@@ -163,7 +163,7 @@ resource "aws_lambda_function" "slack_notifier" {
 
 **`SLACK_WEBHOOK_URL` as environment variable**: The webhook URL is a sensitive value (`sensitive = true` on the Terraform variable). It is stored as a Lambda environment variable rather than hardcoded in the handler source. This means the handler source can be read safely (it contains no secrets), and the webhook URL can be rotated by updating the Terraform variable and re-applying without changing any application code.
 
-### The Handler
+### The Slack Handler
 
 The Python handler is embedded directly in `terraform/lambda.tf` as a Terraform `archive_file` data source with inline content:
 
@@ -214,6 +214,7 @@ def handler(event, context):
 When SNS invokes a Lambda subscriber, the event payload is always a `Records` list even for a single message. Each record in the list contains a `Sns` object with the published message. The `for record in event.get("Records", [])` loop handles the case where SNS delivers a batch of messages in a single invocation (SNS can batch up to 10 records). In practice, SNS delivers pipeline alerts one at a time, but the loop is structurally correct regardless.
 
 The `Sns` object within each record:
+
 ```json
 {
   "Sns": {
@@ -230,7 +231,7 @@ The `Sns` object within each record:
 The handler checks the SNS subject (uppercased) for keywords and assigns a Slack color and emoji accordingly:
 
 | Subject keyword | Hex color | Slack color | Emoji | Meaning |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | `FAILED` or `ERROR` | `#d9534f` | Red | `:x:` | Stage or pipeline failure |
 | `SUCCESS` | `#36a64f` | Green | `:white_check_mark:` | Stage or pipeline success |
 | `STARTED` | `#3aa3e3` | Blue | `:hourglass_flowing_sand:` | Stage beginning |
@@ -285,6 +286,7 @@ resource "aws_iam_role_policy_attachment" "lambda_basic_execution" {
 ```
 
 `AWSLambdaBasicExecutionRole` is the AWS managed policy that grants:
+
 - `logs:CreateLogGroup`
 - `logs:CreateLogStream`
 - `logs:PutLogEvents`
@@ -331,7 +333,7 @@ The two resources must be created in the correct order: the Lambda permission mu
 
 ## The Full Notification Flow
 
-```
+```text
 Glue Job (SnsNotifier._publish)
         │
         │  sns:Publish

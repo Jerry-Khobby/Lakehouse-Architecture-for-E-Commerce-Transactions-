@@ -9,10 +9,18 @@ This document traces every hop a piece of data makes from the moment an operator
 ```
 Operator workstation
   └─ ingest.py
-       ├─ Terraform outputs → bucket name, state machine ARN
+       ├─ Terraform outputs → bucket name
        ├─ load_dataset()  → bytes (xlsx→csv conversion if needed)
-       ├─ s3.put_object   → raw/<file>.csv   (× 3 files)
-       └─ sfn.start_execution → execution input JSON
+       └─ s3.put_object   → raw/<dataset>_<batch>.csv   (× 3 files)
+                │
+                │  S3 Object Created → EventBridge (one event per file)
+                ▼
+       Aggregation Lambda
+       ├─ DynamoDB: record landed file for batch
+       ├─ Check: all 3 datasets present?
+       │    └─ No  → wait for remaining files
+       │    └─ Yes → conditional SET triggered (duplicate guard)
+       └─ sfn.start_execution → execution input JSON (once, for the batch)
                                         │
                           ┌─────────────▼─────────────┐
                           │    AWS Step Functions      │
@@ -62,14 +70,13 @@ The operator runs the ingestion script from a local workstation or CI runner:
 python ingestion/ingest.py
 ```
 
-`run_ingestion()` begins by reading two values from Terraform state:
+`run_ingestion()` begins by reading the S3 bucket name from Terraform state:
 
 ```python
 bucket = fetch_terraform_output("data_bucket_name")
-state_machine_arn = fetch_terraform_output("sfn_state_machine_arn")
 ```
 
-`fetch_terraform_output()` runs `terraform output -raw <name>` as a subprocess from the `terraform/` directory. If Terraform is not on the PATH or the output key does not exist, the script prints an error and exits with code 1. Nothing is uploaded until both values are confirmed.
+`fetch_terraform_output()` runs `terraform output -json` as a subprocess from the `terraform/` directory and extracts the named key. If Terraform is not on the PATH or the output key does not exist, the script prints an error and exits with code 1. The state machine ARN is no longer read here — the aggregation Lambda reads it from its own environment variable (`STATE_MACHINE_ARN`), injected by Terraform at deploy time. The ingestion script only needs the bucket name to target the `put_object` calls.
 
 ---
 
@@ -97,44 +104,74 @@ All three files are uploaded sequentially. If any upload raises `ClientError` or
 
 **What S3 receives:**
 
-| Dataset | S3 key |
-|---|---|
-| products | `raw/products.csv` |
-| orders (April) | `raw/orders_apr_2025.csv` |
-| order items (April) | `raw/order_items_apr_2025.csv` |
-| orders (May) | `raw/orders_may_2025.csv` |
-| order items (May) | `raw/order_items_may_2025.csv` |
+| Dataset | S3 key (April batch) | S3 key (May batch) |
+| --- | --- | --- |
+| products | `raw/products_apr_2025.csv` | `raw/products_may_2025.csv` |
+| orders | `raw/orders_apr_2025.csv` | `raw/orders_may_2025.csv` |
+| order items | `raw/order_items_apr_2025.csv` | `raw/order_items_may_2025.csv` |
+
+All three filenames carry the batch label. The aggregation Lambda parses dataset and batch from each key using the regex `^(products|orders|order_items)_(.+)$` — without the batch label on `products`, the Lambda cannot correlate all three files to the same batch.
 
 ---
 
-## Step 3 — Step Functions Execution Starts
+## Step 3 — EventBridge + Aggregation Lambda Fire Step Functions
 
-**Function:** `start_etl_batch(sfn_client, state_machine_arn, bucket, batch, files)`
+Each `s3.put_object` call in Step 2 triggers an S3 Object Created event. S3 forwards these events to EventBridge (enabled via `aws_s3_bucket_notification.data_bucket`). The EventBridge rule `raw_csv_upload` matches any object created under the `raw/` prefix with a `.csv` suffix and routes it to the aggregation Lambda.
 
-After all three uploads succeed, a single Step Functions execution is started:
+**Per-file Lambda invocation (× 3):**
 
 ```python
-execution_input = {
-    "bucket": bucket,
-    "batch": batch,           # e.g. "may_2025"
-    "files": {
-        "products":    "raw/products.csv",
-        "orders":      "raw/orders_may_2025.csv",
-        "order_items": "raw/order_items_may_2025.csv"
-    }
-}
-execution_name = f"{batch}-{utc_timestamp}"   # e.g. "may_2025-20260615T134313"
+# Invoked once per file — e.g. for raw/orders_apr_2025.csv:
+dataset, batch = resolve_dataset_and_batch("raw/orders_apr_2025.csv")
+# → dataset = "orders", batch = "apr_2025"
 
-sfn_client.start_execution(
-    stateMachineArn=state_machine_arn,
-    name=execution_name,
-    input=json.dumps(execution_input)
+table.update_item(
+    Key={"batch_id": "apr_2025"},
+    UpdateExpression="SET #ds = :key, expires_at = :ttl",
+    ExpressionAttributeNames={"#ds": "orders"},
+    ExpressionAttributeValues={":key": "raw/orders_apr_2025.csv", ":ttl": <now + 24h>},
+    ReturnValues="ALL_NEW",
+)
+# landed = {"batch_id": "apr_2025", "orders": "raw/orders_apr_2025.csv", "expires_at": ...}
+# {k for k in landed if k in EXPECTED_DATASETS} = {"orders"} — only 1/3 present → return, wait
+```
+
+After each of the first two files, the Lambda records the key in DynamoDB and exits without firing Step Functions.
+
+**Third file triggers execution:**
+
+When the third file lands, `ReturnValues="ALL_NEW"` returns all three dataset keys in one response. The Lambda then atomically claims the trigger slot:
+
+```python
+table.update_item(
+    Key={"batch_id": batch},
+    UpdateExpression="SET triggered = :t",
+    ConditionExpression="attribute_not_exists(triggered)",
+    ExpressionAttributeValues={":t": True},
 )
 ```
 
-The execution name is unique because it embeds the UTC timestamp to the second. If the same name already exists (a retry within the same second), `start_etl_batch()` catches `ExecutionAlreadyExists` and exits cleanly, prompting the operator to wait a moment and retry.
+If EventBridge delivered an event more than once (at-least-once guarantee), a second Lambda invocation racing to trigger will hit `ConditionalCheckFailedException` and exit silently — only one execution ever starts per batch.
 
-The operator's script returns the execution ARN and exits. From this point everything runs asynchronously inside Step Functions.
+The winning invocation fires:
+
+```python
+sfn.start_execution(
+    stateMachineArn=STATE_MACHINE_ARN,
+    name=f"{batch}-{context.aws_request_id[:8]}",   # e.g. "apr_2025-a1b2c3d4"
+    input=json.dumps({
+        "bucket": bucket,
+        "batch":  "apr_2025",
+        "files": {
+            "products":    "raw/products_apr_2025.csv",
+            "orders":      "raw/orders_apr_2025.csv",
+            "order_items": "raw/order_items_apr_2025.csv",
+        }
+    })
+)
+```
+
+From this point everything runs asynchronously inside Step Functions. The operator's ingestion script has already exited — it uploaded the files and printed a message pointing to the Step Functions console.
 
 ---
 
@@ -143,7 +180,8 @@ The operator's script returns the execution ARN and exits. From this point every
 The state machine starts at `RunProductsJob`. Step Functions calls Glue's `StartJobRun` API synchronously (`.sync` integration pattern), meaning it waits for the job to complete before advancing.
 
 The state passes two arguments to the Glue job extracted from the execution input:
-- `--RAW_KEY`: `$.files.products` → `raw/products.csv`
+
+- `--RAW_KEY`: `$.files.products` → `raw/products_apr_2025.csv`
 - `--DATA_BUCKET`: `$.bucket` → the bucket name
 
 The Glue job receives these plus all the other `default_arguments` baked into the job definition by Terraform (processed prefix, archived prefix, rejected prefix, SNS ARN, merge keys, partition columns, etc.).
@@ -240,17 +278,17 @@ The `IF NOT EXISTS` clause makes this idempotent. On the first run it creates th
 
 ### 4f — Archive Source File
 
-`archive_source_file(args)` copies `raw/products.csv` to `archived/products/2026-06-15/products.csv` then deletes the source:
+`archive_source_file(args)` copies `raw/products_apr_2025.csv` to `archived/products/2026-06-15/products_apr_2025.csv` then deletes the source:
 ```python
 s3.copy_object(
     Bucket=bucket,
-    CopySource={"Bucket": bucket, "Key": "raw/products.csv"},
-    Key="archived/products/2026-06-15/products.csv",
+    CopySource={"Bucket": bucket, "Key": "raw/products_apr_2025.csv"},
+    Key="archived/products/2026-06-15/products_apr_2025.csv",
     ExpectedBucketOwner=account_id
 )
 s3.delete_object(
     Bucket=bucket,
-    Key="raw/products.csv",
+    Key="raw/products_apr_2025.csv",
     ExpectedBucketOwner=account_id
 )
 ```
@@ -438,8 +476,9 @@ Athena results land in `s3://athena-results-bucket/query-results/` and are auto-
 ## Complete Timing Reference
 
 | Hop | Approximate Duration |
-|---|---|
+| --- | --- |
 | `ingest.py` uploads 3 files | 5–30 seconds (depends on file size and network) |
+| EventBridge routes events + Lambda aggregates (× 3 invocations) | 1–5 seconds total |
 | Step Functions starts execution | < 1 second |
 | `RunProductsJob` (Glue cold start + run) | 4–6 minutes |
 | `RunOrdersJob` | 3–5 minutes |
