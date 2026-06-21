@@ -16,6 +16,7 @@ from botocore.exceptions import ClientError
 
 # Set required env vars before importing the module — they are read at module
 # load time and will raise KeyError if absent.
+os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
 os.environ.setdefault("BATCH_TRACKER_TABLE", "test-batch-tracker")
 os.environ.setdefault("STATE_MACHINE_ARN", "arn:aws:states:us-east-1:123:stateMachine:test")
 os.environ.setdefault("TTL_HOURS", "24")
