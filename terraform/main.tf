@@ -834,8 +834,7 @@ resource "aws_cloudwatch_event_rule" "raw_csv_upload" {
     detail = {
       bucket = { name = [aws_s3_bucket.data.id] }
       object = {
-        key    = [{ prefix = "raw/" }]
-        suffix = [".csv"]
+        key = [{ wildcard = "raw/*.csv" }]
       }
     }
   })
