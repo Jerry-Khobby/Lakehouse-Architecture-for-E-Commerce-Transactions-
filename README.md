@@ -10,51 +10,60 @@ provisioned with Terraform, and shipped through GitHub Actions.
 
 ## 1. Architecture
 
-```
-                ingestion/ingest.py  (uploads 3 CSVs, starts ONE execution)
-                          │
+```text
+                ingestion/ingest.py  (uploads 3 CSVs to S3 raw/)
+                          │  s3:PutObject × 3
                           ▼
-   ┌──────────────┐   raw/    ┌─────────────────────── AWS Step Functions ───────────────────────┐
-   │  Amazon S3   │ ────────▶ │  RunProductsJob → RunOrdersJob → RunOrderItemsJob                  │
-   │  (data bkt)  │           │        (Glue + Delta, strictly ordered for referential integrity) │
-   │              │           │            → RunCrawlers (×3) → AthenaValidation → Notify          │
-   │ lakehouse-dwh│ ◀──────── │                                                                    │
-   │ archived/    │   Delta   └────────────────────────────────────────────────────────────────────┘
-   │ rejected/    │                          │                         │
-   │ flagged/     │                          ▼                         ▼
-   └──────────────┘                  Glue Data Catalog  ───────▶  Amazon Athena
-                                                                  (downstream analytics)
+   ┌──────────────┐   raw/    ┌──── EventBridge ────▶ Aggregation Lambda
+   │  Amazon S3   │ ────────▶ │                        (buffers per-file events in DynamoDB;
+   │  (data bkt)  │           │                         fires ONE execution when all 3 land)
+   │              │           │                              │  states:StartExecution
+   │              │           ▼                              ▼
+   │              │    ┌─────────────────────── AWS Step Functions ───────────────────────┐
+   │              │    │  RunProductsJob → RunOrdersJob → RunOrderItemsJob                │
+   │              │    │        (Glue + Delta, strictly ordered for referential integrity) │
+   │              │    │            → AthenaValidation → Notify                           │
+   │ lakehouse-dwh│ ◀──│                                                                  │
+   │ archived/    │    └──────────────────────────────────────────────────────────────────┘
+   │ rejected/    │                       │                         │
+   │ flagged/     │                       ▼                         ▼
+   └──────────────┘               Glue Data Catalog  ───────▶  Amazon Athena
+                                                               (downstream analytics)
    per-stage START/SUCCESS/FAILURE ──▶ SNS topic ──▶ email + (optional) Slack Lambda
 ```
 
-**Why a single ordered execution and not per-file S3 triggers?** The three
-datasets are one relational batch — `order_items` carries foreign keys into both
-`products` (`product_id`) and `orders` (`order_id`). Three independent
-file-triggered runs would race the referential-integrity checks. One Step
-Functions execution running `products → orders → order_items` makes the
-dependency a structural guarantee. See `terraform/step_functions.tf`.
+**Why EventBridge + an aggregation Lambda instead of per-file triggers?** S3
+fires one event per upload but the state machine needs all three file keys in a
+single execution input. `order_items` carries foreign keys into both `products`
+and `orders` — three independent per-file executions would race the
+referential-integrity joins against empty Delta tables. The aggregation Lambda
+buffers file arrivals in DynamoDB and fires exactly one Step Functions execution
+the moment the third file lands, preserving the `products → orders →
+order_items` dependency as a structural guarantee. See
+`docs/Aggregation_Lambda.md` for the full design.
 
 ### Storage zones (one S3 bucket, prefix-separated)
 
-| Prefix           | Purpose                                              |
-|------------------|------------------------------------------------------|
-| `raw/`           | Incoming source CSVs                                 |
+| Prefix | Purpose |
+| --- | --- |
+| `raw/` | Incoming source CSVs |
 | `lakehouse-dwh/` | Cleaned Delta tables (`products`, `orders`, `order_items`) |
-| `archived/`      | Source files moved here after a successful merge     |
-| `rejected/`      | Rows that failed validation, with a `rejection_reason` |
-| `flagged/`       | Rows that pass but need analyst review (e.g. huge amounts) |
+| `archived/` | Source files moved here after a successful merge |
+| `rejected/` | Rows that failed validation, with a `rejection_reason` |
+| `flagged/` | Rows that pass but need analyst review (e.g. huge amounts) |
 
 ---
 
 ## 2. Datasets, schema & partitioning
 
-| Table         | Merge key (upsert)   | Partition | Notes                                  |
-|---------------|----------------------|-----------|----------------------------------------|
-| `products`    | `product_id`         | `department` | Dimension. Last load wins on match. |
-| `orders`      | `order_id`           | `date`    | Fact. Timestamp guard: newer wins.     |
-| `order_items` | `id, order_id`       | `date`    | Fact. FK → products & orders. Timestamp guard. |
+| Table | Merge key (upsert) | Partition | Notes |
+| --- | --- | --- | --- |
+| `products` | `product_id` | `department` | Dimension. Last load wins on match. |
+| `orders` | `order_id` | `date` | Fact. Timestamp guard: newer wins. |
+| `order_items` | `id, order_id` | `date` | Fact. FK → products & orders. Timestamp guard. |
 
 ### Validation rules enforced (rejected rows are logged to `rejected/`)
+
 - No null primary identifiers (`product_id` / `order_id` / composite `id,order_id`).
 - Valid, parseable timestamps; future timestamps (> 1h ahead) rejected.
 - Type-safe casts (amounts, ids) — bad formats rejected, not silently nulled.
@@ -68,16 +77,17 @@ dependency a structural guarantee. See `terraform/step_functions.tf`.
 
 ## 3. Repository layout
 
-```
+```text
 glue_jobs/
   products_job.py        orders_job.py        order_items_job.py
   utils/
     common.py            # Spark/Delta session, arg parsing, rejected writer, archiver, catalog
     monitor.py           # per-stage timing + live START/SUCCESS/FAILURE alerting
     notifier.py          # SNS publisher
-ingestion/ingest.py      # uploads the batch + starts the Step Functions execution
+aggregation/handler.py   # aggregation Lambda — buffers S3 events, fires Step Functions
+ingestion/ingest.py      # uploads the batch to S3 raw/; EventBridge handles the trigger
 terraform/               # all infrastructure (S3, IAM, Glue, Step Functions, Athena, SNS, Lambda)
-tests/                   # pytest unit tests (validation logic, utils)
+tests/                   # pytest unit tests (validation logic, utils, aggregation Lambda)
 .github/workflows/       # ci.yml (lint + test + tf validate), deploy.yml (scripts → S3 on main)
 Dockerfile, docker-compose.yml
 ```
@@ -86,14 +96,14 @@ Dockerfile, docker-compose.yml
 
 ## 4. Prerequisites
 
-| Tool        | Version            | Notes                                             |
-|-------------|--------------------|---------------------------------------------------|
-| AWS account | —                  | Credentials with permission to create the stack   |
-| Terraform   | ≥ 1.5              | IaC                                               |
-| AWS CLI     | v2                 | `aws configure` or SSO                            |
-| Python      | **3.10** (for tests) | Glue 4.0 runs Spark 3.3.x; tests pin pyspark 3.3.2 |
-| Java        | **11 or 17**       | Required by Spark 3.3.x for local test runs       |
-| Docker      | optional           | Easiest way to run tests with the right versions  |
+| Tool | Version | Notes |
+| --- | --- | --- |
+| AWS account | — | Credentials with permission to create the stack |
+| Terraform | ≥ 1.5 | IaC |
+| AWS CLI | v2 | `aws configure` or SSO |
+| Python | **3.10** (for tests) | Glue 4.0 runs Spark 3.3.x; tests pin pyspark 3.3.2 |
+| Java | **11 or 17** | Required by Spark 3.3.x for local test runs |
+| Docker | optional | Easiest way to run tests with the right versions |
 
 > **Heads-up on local test runs:** Spark 3.3.x does **not** support Java 21+/Python 3.12.
 > If your machine has a newer JDK/Python (this one runs Java 25 + Python 3.12),
@@ -160,15 +170,24 @@ terraform output glue_database_name
 
 ## 7. Run the pipeline
 
-### One command (uploads the sample batch in `Data/` and starts the execution)
+### One command (uploads the April 2025 batch)
 
 ```bash
 python ingestion/ingest.py
 ```
 
-This reads the Terraform outputs, converts the `.xlsx` sources to CSV, uploads
-all three files to `raw/`, then starts **one** Step Functions execution with the
-batch input and prints the execution ARN to track.
+This reads the S3 bucket name from Terraform outputs, converts the `.xlsx`
+sources to CSV, and uploads all three files to `raw/`. From that point the
+trigger is automatic: each upload fires an S3 Object Created event to
+EventBridge, which invokes the aggregation Lambda; once all three files for the
+batch are confirmed present, the Lambda fires a single Step Functions execution.
+The script prints a link to the Step Functions console to track progress.
+
+To run the May 2025 batch instead:
+
+```bash
+python ingestion/ingest_may_2025.py
+```
 
 ### Or trigger manually
 
