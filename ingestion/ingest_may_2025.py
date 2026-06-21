@@ -28,9 +28,9 @@ from pipeline import run_ingestion
 BATCH = "may_2025"
 
 DATASETS = {
-    "products":    {"file": "products.csv",                "key": "raw/products_may_2025.csv"},
-    "orders":      {"file": "orders_may_2025.csv",         "key": "raw/orders_may_2025.csv"},
-    "order_items": {"file": "order_items_may_2025.csv",    "key": "raw/order_items_may_2025.csv"},
+    "products": {"file": "products.csv", "key": "raw/products_may_2025.csv"},
+    "orders": {"file": "orders_may_2025.csv", "key": "raw/orders_may_2025.csv"},
+    "order_items": {"file": "order_items_may_2025.csv", "key": "raw/order_items_may_2025.csv"},
 }
 
 

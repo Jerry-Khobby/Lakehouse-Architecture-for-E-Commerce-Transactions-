@@ -35,9 +35,9 @@ resource "aws_iam_role_policy" "aggregation_dynamodb" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Sid    = "BatchTrackerReadWrite"
-      Effect = "Allow"
-      Action = ["dynamodb:UpdateItem", "dynamodb:GetItem"]
+      Sid      = "BatchTrackerReadWrite"
+      Effect   = "Allow"
+      Action   = ["dynamodb:UpdateItem", "dynamodb:GetItem"]
       Resource = [aws_dynamodb_table.batch_tracker.arn]
     }]
   })

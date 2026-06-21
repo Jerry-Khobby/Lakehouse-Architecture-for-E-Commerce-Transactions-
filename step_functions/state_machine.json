@@ -1,0 +1,187 @@
+{
+  "_comment": [
+    "Amazon States Language (ASL) definition for the E-Commerce Lakehouse ETL pipeline.",
+    "",
+    "This file is a standalone, human-readable representation of the state machine",
+    "that lives in terraform/step_functions.tf. It is NOT executed directly — Terraform",
+    "provisions the actual AWS resource. Keep this file in sync when the Terraform",
+    "definition changes.",
+    "",
+    "Placeholder values that vary per deployment:",
+    "  - JobName fields use the default name_prefix 'ecom-lakehouse-dev'.",
+    "    For staging/prod, replace 'dev' with the correct environment suffix.",
+    "  - TopicArn: replace '123456789012' with your AWS account ID.",
+    "    Run: terraform -chdir=terraform output pipeline_alerts_topic_arn",
+    "",
+    "Execution input shape (supplied by the aggregation Lambda):",
+    "  {",
+    "    \"bucket\": \"<data-bucket-name>\",",
+    "    \"batch\":  \"apr_2025\",",
+    "    \"files\": {",
+    "      \"products\":    \"raw/products_apr_2025.csv\",",
+    "      \"orders\":      \"raw/orders_apr_2025.csv\",",
+    "      \"order_items\": \"raw/order_items_apr_2025.csv\"",
+    "    }",
+    "  }"
+  ],
+
+  "Comment": "E-commerce Lakehouse single-batch ETL pipeline — dev",
+  "StartAt": "RunProductsJob",
+
+  "States": {
+
+    "RunProductsJob": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Comment": "Step 1: Products dimension — no upstream dependency, runs first.",
+      "Parameters": {
+        "JobName": "ecom-lakehouse-dev-products-etl",
+        "Arguments": {
+          "--RAW_KEY.$": "$.files.products",
+          "--DATA_BUCKET.$": "$.bucket"
+        }
+      },
+      "TimeoutSeconds": 7200,
+      "HeartbeatSeconds": 300,
+      "Retry": [
+        {
+          "ErrorEquals": ["Glue.AWSGlueException", "States.TaskFailed", "States.Timeout"],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "NotifyFailure",
+          "ResultPath": "$.error"
+        }
+      ],
+      "ResultPath": "$.results.products",
+      "Next": "RunOrdersJob"
+    },
+
+    "RunOrdersJob": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Comment": "Step 2: Orders fact — no upstream dependency, runs second.",
+      "Parameters": {
+        "JobName": "ecom-lakehouse-dev-orders-etl",
+        "Arguments": {
+          "--RAW_KEY.$": "$.files.orders",
+          "--DATA_BUCKET.$": "$.bucket"
+        }
+      },
+      "TimeoutSeconds": 7200,
+      "HeartbeatSeconds": 300,
+      "Retry": [
+        {
+          "ErrorEquals": ["Glue.AWSGlueException", "States.TaskFailed", "States.Timeout"],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "NotifyFailure",
+          "ResultPath": "$.error"
+        }
+      ],
+      "ResultPath": "$.results.orders",
+      "Next": "RunOrderItemsJob"
+    },
+
+    "RunOrderItemsJob": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Comment": "Step 3: Order items — depends on products AND orders. Runs last so FK joins resolve against committed Delta tables.",
+      "Parameters": {
+        "JobName": "ecom-lakehouse-dev-order-items-etl",
+        "Arguments": {
+          "--RAW_KEY.$": "$.files.order_items",
+          "--DATA_BUCKET.$": "$.bucket"
+        }
+      },
+      "TimeoutSeconds": 7200,
+      "HeartbeatSeconds": 300,
+      "Retry": [
+        {
+          "ErrorEquals": ["Glue.AWSGlueException", "States.TaskFailed", "States.Timeout"],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "NotifyFailure",
+          "ResultPath": "$.error"
+        }
+      ],
+      "ResultPath": "$.results.order_items",
+      "Next": "AthenaValidation"
+    },
+
+    "AthenaValidation": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::athena:startQueryExecution.sync",
+      "Comment": "Step 4: Smoke-test — confirms all three Delta tables are queryable and report row counts.",
+      "Parameters": {
+        "WorkGroup": "ecom-lakehouse-wg",
+        "QueryString": "SELECT 'products' AS tbl, COUNT(*) AS row_count FROM ecom_lakehouse_db.products UNION ALL SELECT 'orders', COUNT(*) FROM ecom_lakehouse_db.orders UNION ALL SELECT 'order_items', COUNT(*) FROM ecom_lakehouse_db.order_items;"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": ["Athena.AthenaException", "Athena.TooManyRequestsException"],
+          "IntervalSeconds": 15,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "NotifyFailure",
+          "ResultPath": "$.error"
+        }
+      ],
+      "ResultPath": "$.results.athena",
+      "Next": "NotifySuccess"
+    },
+
+    "NotifySuccess": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Comment": "Step 5a: Publish success notification. $.batch is always present — never overwritten by any prior ResultPath.",
+      "Parameters": {
+        "TopicArn": "arn:aws:sns:us-east-1:123456789012:ecom-lakehouse-dev-pipeline-alerts",
+        "Message.$": "States.Format('✅ Lakehouse ETL batch completed successfully.\nBatch: {}\nExecution: {}', $.batch, $$.Execution.Name)",
+        "Subject": "[dev] Lakehouse ETL — SUCCESS"
+      },
+      "End": true
+    },
+
+    "NotifyFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Comment": "Step 5b: Publish failure notification, then transition to terminal Fail state.",
+      "Parameters": {
+        "TopicArn": "arn:aws:sns:us-east-1:123456789012:ecom-lakehouse-dev-pipeline-alerts",
+        "Message.$": "States.Format('❌ Lakehouse ETL batch FAILED.\nBatch: {}\nExecution: {}\nCheck CloudWatch logs for details.', $.batch, $$.Execution.Name)",
+        "Subject": "[dev] Lakehouse ETL — FAILURE"
+      },
+      "Next": "PipelineFailed"
+    },
+
+    "PipelineFailed": {
+      "Type": "Fail",
+      "Error": "PipelineFailed",
+      "Cause": "One or more ETL stages failed. Check CloudWatch logs."
+    }
+
+  }
+}

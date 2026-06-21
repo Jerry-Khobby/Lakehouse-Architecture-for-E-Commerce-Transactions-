@@ -24,9 +24,9 @@ from pipeline import run_ingestion  # noqa: F401
 BATCH = "apr_2025"
 
 DATASETS = {
-    "products":    {"file": "products.csv",                "key": "raw/products_apr_2025.csv"},
-    "orders":      {"file": "orders_apr_2025.xlsx",        "key": "raw/orders_apr_2025.csv"},
-    "order_items": {"file": "order_items_apr_2025.xlsx",   "key": "raw/order_items_apr_2025.csv"},
+    "products": {"file": "products.csv", "key": "raw/products_apr_2025.csv"},
+    "orders": {"file": "orders_apr_2025.xlsx", "key": "raw/orders_apr_2025.csv"},
+    "order_items": {"file": "order_items_apr_2025.xlsx", "key": "raw/order_items_apr_2025.csv"},
 }
 
 
